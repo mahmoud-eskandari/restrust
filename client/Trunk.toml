@@ -1,0 +1,3 @@
+[build]
+# The binary target (src/main.rs) is built for wasm32; see index.html for the
+# <link data-trunk rel="rust"> bootstrap and the `the_canvas_id` canvas.

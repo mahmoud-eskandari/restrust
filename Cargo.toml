@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/restrust-core",
+    "crates/restrust-interchange",
+    "client",
+    "server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/mahmoud-eskandari/restrust"
+
+[workspace.dependencies]
+restrust-core = { path = "crates/restrust-core" }
+restrust-interchange = { path = "crates/restrust-interchange" }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml_ng = "0.10"
+thiserror = "2"
+# "js" is required for uuid v4 ids to compile on wasm32-unknown-unknown; it is
+# cfg-gated to wasm targets and has no effect on native builds.
+uuid = { version = "1", features = ["v4", "serde", "js"] }
+chrono = { version = "0.4", features = ["serde"] }
+rand = "0.10"
+base64 = "0.23"
+percent-encoding = "2"
+url = "2"
+
+egui = "0.37"
+eframe = "0.37"
+ehttp = "0.7"
+
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+axum-server = { version = "0.8", features = ["tls-rustls"] }
+tower = "0.5"
+tower-http = { version = "0.7", features = ["fs", "cors"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+argon2 = "0.6"
+jsonwebtoken = "11"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+rustls-acme = "0.15"
+rustls-pemfile = "2"
+# Used by the server to drive rustls-acme's event stream (its own examples'
+# documented pattern); already a transitive dependency, so no new crates.
+futures = "0.3"
+log = "0.4"
+env_logger = "0.11"
+
+dirs = "7"
+open = "5"
+wasm-bindgen-futures = "0.4"

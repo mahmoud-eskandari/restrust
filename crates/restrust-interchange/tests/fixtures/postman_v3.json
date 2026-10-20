@@ -1,0 +1,52 @@
+{
+  "info": {
+    "name": "V3 Demo",
+    "description": "A small v3 collection",
+    "version": { "tag": "1.0.0" },
+    "schema": "https://schema.getpostman.com/json/collection/v3.0.0/collection.json"
+  },
+  "variables": {
+    "base_url": { "value": "https://api.demo.test", "type": "string" }
+  },
+  "items": [
+    {
+      "kind": "request",
+      "name": "Health check",
+      "request": {
+        "method": "GET",
+        "url": "{{base_url}}/health",
+        "header": [
+          { "key": "Accept", "value": "application/json" }
+        ]
+      }
+    },
+    {
+      "kind": "folder",
+      "name": "Things",
+      "description": "thing operations",
+      "items": [
+        {
+          "kind": "request",
+          "name": "Create thing",
+          "request": {
+            "method": "POST",
+            "url": {
+              "raw": "{{base_url}}/things",
+              "host": [ "{{base_url}}" ],
+              "path": [ "things" ]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\"name\":\"x\"}",
+              "options": { "raw": { "language": "json" } }
+            },
+            "auth": {
+              "type": "bearer",
+              "bearer": [ { "key": "token", "value": "abc123" } ]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

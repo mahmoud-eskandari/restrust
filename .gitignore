@@ -1,0 +1,24 @@
+# Private product working documents
+mydocs/
+
+# Build output
+target/
+client/dist/
+
+# ZCode local agent definitions
+.zcode/
+
+# Local runtime data
+data/
+*.db
+*.db-wal
+*.db-shm
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Editor noise
+*.swp
+.idea/
+.vscode/

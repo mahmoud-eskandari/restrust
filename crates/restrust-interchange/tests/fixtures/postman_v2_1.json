@@ -1,0 +1,98 @@
+{
+  "info": {
+    "name": "Demo API",
+    "_postman_id": "11111111-1111-1111-1111-111111111111",
+    "description": "Fixture collection exercising the v2.1 import surface",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "base_url", "value": "https://api.demo.test", "type": "string" },
+    { "key": "api_key", "value": "secret-key", "type": "string" }
+  ],
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "console.log('setting up');",
+          "pm.environment.get('api_key');"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "v1",
+      "description": "versioned endpoints",
+      "item": [
+        {
+          "name": "login",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Accept", "value": "application/json", "description": "always accept JSON" }
+            ],
+            "body": {
+              "mode": "urlencoded",
+              "urlencoded": [
+                { "key": "username", "value": "admin", "type": "text" },
+                { "key": "password", "value": "hunter2", "type": "text" },
+                { "key": "otp", "value": "000000", "type": "text", "disabled": true }
+              ]
+            },
+            "url": {
+              "raw": "{{base_url}}/login",
+              "host": [ "{{base_url}}" ],
+              "path": [ "login" ]
+            },
+            "description": "Exchange credentials for a token."
+          },
+          "protocolProfileBehavior": { "disableBodyPruning": true }
+        },
+        {
+          "name": "admin",
+          "description": "administrative endpoints",
+          "item": [
+            {
+              "name": "create user",
+              "request": {
+                "method": "POST",
+                "header": [
+                  { "key": "Content-Type", "value": "application/json" },
+                  { "key": "X-Trace", "value": "1", "disabled": true }
+                ],
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"name\": \"ada\",\n  \"role\": \"admin\"\n}",
+                  "options": { "raw": { "language": "json" } }
+                },
+                "url": {
+                  "raw": "{{base_url}}/users?page=1&verbose=true",
+                  "host": [ "{{base_url}}" ],
+                  "path": [ "users" ],
+                  "query": [
+                    { "key": "page", "value": "1" },
+                    { "key": "verbose", "value": "true" },
+                    { "key": "dry", "value": "false", "disabled": true }
+                  ]
+                },
+                "auth": {
+                  "type": "bearer",
+                  "bearer": [ { "key": "token", "value": "{{api_key}}", "type": "string" } ]
+                }
+              }
+            },
+            {
+              "name": "audit log",
+              "request": {
+                "method": "GET",
+                "url": "{{base_url}}/audit?since=2026-01-01"
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

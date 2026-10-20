@@ -1,0 +1,92 @@
+openapi: 3.0.3
+info:
+  title: Petstore Demo
+  description: A small petstore-like API for tests
+  version: 1.0.0
+servers:
+  - url: https://petstore.example.test/api/v1
+security:
+  - petstore_auth: []
+tags:
+  - name: pets
+paths:
+  /pets:
+    parameters:
+      - name: limit
+        in: query
+        required: false
+        description: how many items to return
+        schema:
+          type: integer
+    get:
+      operationId: listPets
+      summary: List all pets
+      tags: [pets]
+      parameters:
+        - name: page
+          in: query
+          required: true
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: ok
+    post:
+      operationId: createPet
+      summary: Create a pet
+      tags: [pets]
+      deprecated: true
+      security:
+        - api_key: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Pet'
+      responses:
+        '201':
+          description: created
+  /pets/{petId}:
+    get:
+      summary: Info for a specific pet
+      parameters:
+        - name: petId
+          in: path
+          required: true
+          description: the pet id
+          schema:
+            type: string
+      responses:
+        '200':
+          description: ok
+components:
+  securitySchemes:
+    petstore_auth:
+      type: http
+      scheme: bearer
+    api_key:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+  schemas:
+    Pet:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+          example: doggie
+        tag:
+          $ref: '#/components/schemas/Tag'
+        status:
+          type: string
+          enum: [available, sold]
+    Tag:
+      type: object
+      properties:
+        id:
+          type: integer
+        label:
+          type: string
