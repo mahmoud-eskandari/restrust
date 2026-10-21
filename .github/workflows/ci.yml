@@ -33,9 +33,10 @@ jobs:
       - uses: ./.github/actions/setup-rust
         with:
           cache-key: quality
-      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
-        with:
-          tool: actionlint@1.7.12
+      - name: Install workflow validator
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
       - name: Validate workflows
         run: actionlint
       - name: Check formatting
