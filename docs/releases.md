@@ -22,9 +22,13 @@ Open a completed CI run in GitHub Actions and download the appropriate `release-
 ## Create a versioned release
 
 1. Update `workspace.package.version` in `Cargo.toml` and refresh `Cargo.lock` with Cargo.
-2. Commit the release version, then push a matching tag such as `v0.1.0`.
-3. The **Release** workflow verifies the tag matches the workspace version, invokes the complete CI workflow, downloads all six archives, and verifies their checksums.
+2. Commit the release version, then push a matching tag such as `v0.1.0`. A stable workspace version also accepts a prerelease suffix: with `0.1.0` in Cargo, tags such as `v0.1.0-beta`, `v0.1.0-beta.1`, and `v0.1.0-rc.1` are valid. A different base version, such as `v0.2.0-beta`, is rejected. If Cargo already contains a prerelease version, the tag must match it exactly.
+3. The **Release** workflow validates the tag and applies its complete version to the temporary CI checkouts. It refreshes workspace lockfile entries with `cargo update --workspace`, then runs the complete CI workflow with locked dependencies. Binaries and archives therefore carry the full version, including `-beta`. It downloads all six archives and verifies their checksums.
 4. It creates a **draft** GitHub release with the archives and `SHA256SUMS`. Review the draft and publish it from GitHub when ready.
+
+Prerelease tags also set GitHub's **Pre-release** flag. Stable tags leave that flag off. Version preparation only changes the CI checkout; it does not commit or push changes to the repository.
+
+Create a tag on the commit containing the current release workflow. Rerunning an old failed tag run uses its original commit and workflow; merging a fix into `main` does not update that run.
 
 Rerunning the tag workflow can replace assets in an existing draft. It refuses to overwrite assets on a published release. Manual CI runs only produce Actions artifacts and do not create a release.
 
