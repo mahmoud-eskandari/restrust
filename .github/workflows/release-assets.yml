@@ -1,0 +1,46 @@
+name: Upload release assets
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag (for example v0.1.0-beta)
+        required: true
+        type: string
+      run_id:
+        description: Release run ID whose tests and builds succeeded
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    name: Upload verified existing builds
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.tag }}
+      SOURCE_RUN_ID: ${{ inputs.run_id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Verify source tag and successful builds
+        run: python3 scripts/ci/publish_release.py --verify-run "$SOURCE_RUN_ID"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.run_id }}
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Verify checksums and upload missing assets
+        run: python3 scripts/ci/publish_release.py
