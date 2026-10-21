@@ -28,3 +28,7 @@ runs:
       with:
         key: ${{ inputs.cache-key }}
         save-if: ${{ github.event_name != 'pull_request' }}
+    - name: Prepare tagged release version
+      if: github.ref_type == 'tag'
+      shell: bash
+      run: python scripts/ci/release_version.py --prepare
