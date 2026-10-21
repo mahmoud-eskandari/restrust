@@ -7,6 +7,7 @@ use crate::config::Config;
 use crate::oidc::ProviderConfig;
 
 pub struct AppState {
+    pub http: reqwest::Client,
     /// SQLite connection behind a std Mutex — handlers never hold the guard
     /// across an `.await`. Single process, WAL mode (CONTRACT §4).
     pub db: Mutex<rusqlite::Connection>,
@@ -24,6 +25,11 @@ impl AppState {
     pub fn shared(db: rusqlite::Connection, config: Config) -> SharedState {
         let oidc_providers = ProviderConfig::from_config(&config);
         Arc::new(AppState {
+            http: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .redirect(reqwest::redirect::Policy::limited(10))
+                .build()
+                .expect("HTTP client"),
             db: Mutex::new(db),
             config,
             oidc_providers,

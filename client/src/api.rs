@@ -12,6 +12,43 @@ use serde::Deserialize;
 /// The server's API prefix.
 pub const API_ROOT: &str = "/api/v1";
 
+pub fn execute(base: &str, token: &str, request: ehttp::Request) -> ehttp::Request {
+    let payload = restrust_core::execution::ExecuteRequest {
+        method: request.method.as_str().into(),
+        url: request.url,
+        headers: request.headers.headers,
+        body: request.body,
+    };
+    json_request(
+        "POST",
+        join_url(base, API_ROOT) + "/execute",
+        Some(token),
+        serde_json::to_string(&payload).expect("execution JSON"),
+    )
+}
+
+pub fn parse_execution(
+    result: &Result<ehttp::Response, String>,
+) -> Result<(ehttp::Response, u64), ApiError> {
+    parse_ok(result, |response| {
+        let value: restrust_core::execution::ExecuteResponse =
+            deser(response.text().unwrap_or(""))?;
+        Ok((
+            ehttp::Response {
+                url: value.url,
+                ok: (200..300).contains(&value.status),
+                status: value.status,
+                status_text: value.reason,
+                headers: ehttp::Headers {
+                    headers: value.headers,
+                },
+                bytes: value.body,
+            },
+            value.duration_ms,
+        ))
+    })
+}
+
 /// Errors from talking to the server.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ApiError {
@@ -289,9 +326,11 @@ pub fn collection_put(
     base_revision: u64,
     collection: &Collection,
 ) -> ehttp::Request {
+    let mut collection = collection.clone();
+    collection.id = id.to_string();
     let body = serde_json::json!({
         "base_revision": base_revision,
-        "collection": serde_json::to_value(collection).unwrap_or(serde_json::Value::Null),
+        "collection": serde_json::to_value(&collection).unwrap_or(serde_json::Value::Null),
     })
     .to_string();
     json_request(

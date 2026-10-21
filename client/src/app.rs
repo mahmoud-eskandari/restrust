@@ -31,8 +31,12 @@ pub enum InflightOp {
         tab_id: u64,
         def: Box<RequestDef>,
         started: Instant,
+        relayed: bool,
+        session_token: Option<String>,
     },
-    Providers,
+    Providers {
+        server: String,
+    },
     Login {
         server: String,
         remember: bool,
@@ -55,6 +59,7 @@ pub enum InflightOp {
     CollectionPut {
         server: String,
         local_id: String,
+        sent: Box<Collection>,
         force: bool,
         /// Enable-sync final push: the fresh server id to claim.
         enable: Option<String>,
@@ -126,6 +131,12 @@ impl RestrustApp {
         }
 
         let mut app_state = state::AppState::new(doc);
+        #[cfg(target_arch = "wasm32")]
+        {
+            let origin = wasm_origin();
+            app_state.active_server = Some(origin.clone());
+            app_state.doc.settings.server_url = Some(origin);
+        }
         if let Some(reason) = corrupt {
             app_state.push_banner(
                 Severity::Warning,
@@ -194,12 +205,48 @@ impl RestrustApp {
     }
 
     pub fn server_url(&self) -> String {
+        self.state.active_server.clone().unwrap_or_default()
+    }
+
+    pub fn can_switch_server(&self) -> bool {
+        !self.state.sync_in_flight
+            && self
+                .inflight
+                .values()
+                .all(|op| matches!(op, InflightOp::Send { .. } | InflightOp::Providers { .. }))
+            && self.admin.lock().unwrap().pending.is_empty()
+    }
+
+    fn clear_server_work(&mut self) {
+        self.inflight
+            .retain(|_, op| matches!(op, InflightOp::Send { .. }));
+        *self.admin.lock().unwrap() = AdminUi::default();
+        self.state.admin_open = false;
+        self.state.sync_in_flight = false;
+        self.sync_pending = 0;
+        self.sync_errors.clear();
+        self.last_list_entries.clear();
+    }
+
+    pub fn switch_server(&mut self, server: Option<String>) {
+        if IS_WASM || !self.can_switch_server() {
+            return;
+        }
+        self.clear_server_work();
+        self.state.select_server(server.clone());
+        self.state.dialog = DialogState::None;
+        self.state.doc.settings.server_url =
+            server.filter(|s| self.state.doc.settings.servers.contains(s));
+        self.state.mark_edited();
+        if self.state.login.signed_in() {
+            self.sync_now();
+        }
+    }
+
+    fn collection_on_active_server(&self, local_id: &str) -> bool {
         self.state
-            .doc
-            .settings
-            .server_url
-            .clone()
-            .unwrap_or_default()
+            .find_stored(local_id)
+            .is_some_and(|s| self.state.belongs_to_active_server(s))
     }
 
     pub fn host_of(url: &str) -> String {
@@ -214,6 +261,20 @@ impl RestrustApp {
         self.services.storage.save(&self.state.doc);
         self.state.dirty = false;
         self.last_saved_hhmm = Some(state::hhmm_now());
+    }
+
+    pub fn save_active_request(&mut self) {
+        if let Some(tab) = self.state.active_tab() {
+            if matches!(tab.kind, state::TabKind::Scratch(_)) {
+                self.state.dialog = DialogState::SaveScratchInto {
+                    tab_id: tab.id,
+                    collection_id: None,
+                    parent_folder: None,
+                };
+                return;
+            }
+        }
+        self.save_now();
     }
 
     fn autosave_tick(&mut self) {
@@ -255,19 +316,35 @@ impl RestrustApp {
             return;
         };
         let (auth, scopes) = self.state.auth_and_scopes_for(&def);
-        match send::build_request(&def, &auth, &scopes) {
+        let request = send::build_request(&def, &auth, &scopes).and_then(|req| {
+            send::route_request(
+                req,
+                IS_WASM,
+                &self.server_url(),
+                self.state.login.token.as_deref(),
+            )
+        });
+        match request {
             Ok(req) => {
+                if let Some(tab) = self.state.active_tab_mut() {
+                    tab.send_error = None;
+                }
                 self.state.sending_tabs.insert(tab_id);
                 self.api_fetch(
                     InflightOp::Send {
                         tab_id,
                         def: Box::new(def),
                         started: Instant::now(),
+                        relayed: IS_WASM,
+                        session_token: self.state.login.token.clone(),
                     },
                     req,
                 );
             }
             Err(err) => {
+                if let Some(tab) = self.state.active_tab_mut() {
+                    tab.send_error = Some(err.clone());
+                }
                 self.send_failed_banner(&err);
                 self.state.doc.add_history(def, None);
                 self.state.mark_edited();
@@ -277,7 +354,7 @@ impl RestrustApp {
 
     fn send_failed_banner(&mut self, err: &str) {
         let message = if IS_WASM {
-            format!("Request failed: {err}. Check the URL, network, and CORS — the browser blocks cross-origin requests without server opt-in.")
+            format!("Request failed: {err}. Web requests run through your restrust server; sign in and check that it can reach the target URL.")
         } else {
             format!("Request failed: {err}. Check the URL and network, then send again.")
         };
@@ -319,14 +396,23 @@ impl RestrustApp {
     }
 
     pub fn fetch_providers(&mut self, server: String) {
-        self.api_fetch(InflightOp::Providers, api::providers(&server));
+        self.api_fetch(
+            InflightOp::Providers {
+                server: server.clone(),
+            },
+            api::providers(&server),
+        );
     }
 
     pub fn logout(&mut self) {
+        self.clear_server_work();
         let token = self.state.login.token.take().unwrap_or_default();
         self.state.login.user = None;
         self.state.login.organizations.clear();
         self.state.login.status = ServerStatus::Offline;
+        self.state.sync_info.clear();
+        self.state.grants_known.clear();
+        self.state.slug_known.clear();
         self.state.namespace = NamespaceSelection::Personal;
         self.state.admin_open = false;
         self.state.sync_in_flight = false;
@@ -341,7 +427,10 @@ impl RestrustApp {
     }
 
     pub fn session_established(&mut self, server: String, token: String, remember: bool) {
-        if remember || self.state.doc.settings.server_url.is_none() {
+        if remember {
+            if !self.state.doc.settings.servers.contains(&server) {
+                self.state.doc.settings.servers.push(server.clone());
+            }
             self.state.doc.settings.server_url = Some(server.clone());
         }
         self.state.login.token = Some(token);
@@ -412,6 +501,7 @@ impl RestrustApp {
     }
 
     pub fn handle_unauthorized(&mut self) {
+        self.clear_server_work();
         self.state.login.token = None;
         self.state.login.user = None;
         self.state.login.organizations.clear();
@@ -471,6 +561,7 @@ impl RestrustApp {
             InflightOp::CollectionPut {
                 server: base.to_string(),
                 local_id,
+                sent: Box::new(collection.clone()),
                 force,
                 enable,
             },
@@ -502,6 +593,9 @@ impl RestrustApp {
 
     /// 409 dialog choice: force PUT with the server revision.
     pub fn overwrite_server_copy(&mut self, collection_id: &str, server_revision: u64) {
+        if !self.collection_on_active_server(collection_id) {
+            return;
+        }
         let (Some(token), base, Some(stored)) = (
             self.state.login.token.clone(),
             self.server_base().unwrap_or_default(),
@@ -515,7 +609,7 @@ impl RestrustApp {
         self.state.dialog = DialogState::None;
         self.state.sync_in_flight = true;
         self.state.login.status = ServerStatus::Syncing;
-        self.sync_pending = 1;
+        self.sync_pending = 0;
         self.sync_errors.clear();
         self.collection_put_request(
             &base,
@@ -537,6 +631,9 @@ impl RestrustApp {
     // === share / publish ================================================================
 
     pub fn shares_save(&mut self, local_id: &str, server_id: &str, grants: Vec<ShareGrant>) {
+        if !self.collection_on_active_server(local_id) {
+            return;
+        }
         let (Some(token), base) = (
             self.state.login.token.clone(),
             self.server_base().unwrap_or_default(),
@@ -558,6 +655,9 @@ impl RestrustApp {
     }
 
     pub fn publish(&mut self, local_id: &str, server_id: &str, slug: Option<String>) {
+        if !self.collection_on_active_server(local_id) {
+            return;
+        }
         let (Some(token), base) = (
             self.state.login.token.clone(),
             self.server_base().unwrap_or_default(),
@@ -581,6 +681,9 @@ impl RestrustApp {
     }
 
     pub fn unpublish(&mut self, local_id: &str, server_id: &str, slug: String) {
+        if !self.collection_on_active_server(local_id) {
+            return;
+        }
         let (Some(token), base) = (
             self.state.login.token.clone(),
             self.server_base().unwrap_or_default(),
@@ -602,6 +705,16 @@ impl RestrustApp {
     }
 
     pub fn delete_collection(&mut self, collection_id: &str) {
+        if self
+            .state
+            .find_stored(collection_id)
+            .is_some_and(|s| s.origin.is_some())
+            && !self.collection_on_active_server(collection_id)
+        {
+            self.state
+                .push_toast("Select this collection's server before deleting it".into());
+            return;
+        }
         let server_id = self
             .state
             .find_stored(collection_id)
@@ -853,13 +966,29 @@ impl RestrustApp {
                 tab_id,
                 def,
                 started,
+                relayed,
+                session_token,
             } => {
                 self.state.sending_tabs.remove(&tab_id);
                 let def = *def;
+                let (result, duration_ms) = if relayed {
+                    match api::parse_execution(&result) {
+                        Ok((response, duration)) => (Ok(response), duration),
+                        Err(err) => {
+                            if matches!(err, ApiError::Unauthorized)
+                                && session_token == self.state.login.token
+                            {
+                                self.handle_unauthorized();
+                            }
+                            (Err(err.server_message()), 0)
+                        }
+                    }
+                } else {
+                    (result, started.elapsed().as_millis() as u64)
+                };
                 match &result {
                     Ok(resp) => {
-                        let summary =
-                            send::summary_from_response(resp, started.elapsed().as_millis() as u64);
+                        let summary = send::summary_from_response(resp, duration_ms);
                         let cached = CachedResponse {
                             meta: summary.clone(),
                             body: resp.bytes.clone(),
@@ -870,14 +999,20 @@ impl RestrustApp {
                         self.state.mark_edited();
                     }
                     Err(err) => {
+                        if let Some(tab) = self.state.tabs.iter_mut().find(|t| t.id == tab_id) {
+                            tab.send_error = Some(err.clone());
+                        }
                         self.send_failed_banner(err);
                         self.state.doc.add_history(def, None);
                         self.state.mark_edited();
                     }
                 }
             }
-            InflightOp::Providers => {
+            InflightOp::Providers { server } => {
                 if let DialogState::SignIn(dialog) = &mut self.state.dialog {
+                    if dialog.providers_server.as_deref() != Some(&server) {
+                        return;
+                    }
                     dialog.providers_loaded = true;
                     match api::parse_ok(&result, |r| api::parse_providers(r.text().unwrap_or(""))) {
                         Ok(providers) => dialog.providers = providers,
@@ -888,14 +1023,10 @@ impl RestrustApp {
             InflightOp::Login { server, remember } => {
                 match api::parse_ok(&result, |r| api::parse_login(r.text().unwrap_or(""))) {
                     Ok(login) => {
-                        if let DialogState::SignIn(dialog) = &mut self.state.dialog {
-                            dialog.in_flight = false;
-                        }
                         let id = self
                             .services
                             .http
                             .fetch_tracked(api::session(&server, &login.token));
-                        self.state.login.user = Some(login.user);
                         self.inflight.insert(
                             id,
                             InflightOp::Session {
@@ -922,6 +1053,8 @@ impl RestrustApp {
                 remember,
             } => match api::parse_ok(&result, |r| api::parse_session(r.text().unwrap_or(""))) {
                 Ok(session) => {
+                    self.clear_server_work();
+                    self.state.select_server(Some(server.clone()));
                     self.state.login.user = Some(session.user);
                     self.state.login.organizations = session.organizations;
                     self.session_established(server, token, remember);
@@ -932,6 +1065,7 @@ impl RestrustApp {
                         err.server_message()
                     );
                     if let DialogState::SignIn(dialog) = &mut self.state.dialog {
+                        dialog.in_flight = false;
                         dialog.completing = false;
                         dialog.error = Some(message);
                     } else if matches!(err, ApiError::Unauthorized) {
@@ -999,6 +1133,7 @@ impl RestrustApp {
             InflightOp::CollectionPut {
                 server,
                 local_id,
+                sent,
                 force,
                 enable,
             } => {
@@ -1016,12 +1151,13 @@ impl RestrustApp {
                                     sync::personal_namespace(&user.id, &user.username),
                                     new_revision,
                                 );
+                                sync::acknowledge_push(stored, &sent, new_revision);
                                 self.state.push_toast(format!("Synced \"{name}\""));
                                 self.state.mark_edited();
                             }
                         } else if let Some(stored) = self.state.stored_mut(&local_id) {
                             let name = stored.collection.name.clone();
-                            sync::apply_response(stored, &SyncOutcome::Pushed { new_revision });
+                            sync::acknowledge_push(stored, &sent, new_revision);
                             self.sync_worked = true;
                             if force {
                                 self.state
@@ -1223,6 +1359,7 @@ impl RestrustApp {
             .personal
             .iter()
             .chain(self.state.doc.organizations.iter())
+            .filter(|s| self.state.belongs_to_active_server(s))
             .cloned()
             .collect();
         let server_entries: Vec<sync::ServerEntry> = entries
@@ -1292,8 +1429,19 @@ impl RestrustApp {
         server: &str,
         server_id: &str,
         local_id: &str,
-        get: api::CollectionGetResponse,
+        mut get: api::CollectionGetResponse,
     ) {
+        if self
+            .state
+            .find_stored(local_id)
+            .is_some_and(|s| matches!(s.sync, SyncState::PendingEdits { .. }))
+        {
+            self.state.push_toast(
+                "Local edits were kept. Sync again to resolve the newer server revision.".into(),
+            );
+            self.sync_step_done();
+            return;
+        }
         let namespace = self.list_entry_namespace(server_id).unwrap_or_else(|| {
             let user = self.state.login.user.clone().unwrap_or_default();
             NamespaceRef {
@@ -1315,6 +1463,8 @@ impl RestrustApp {
             _ => None,
         };
         if local_id.is_empty() {
+            // Local identity is independent of server identity, even for cloned servers.
+            get.collection.id = restrust_core::model::new_id();
             let stored = StoredCollection {
                 collection: get.collection,
                 sync: SyncState::Synced { revision },
@@ -1330,6 +1480,7 @@ impl RestrustApp {
                 _ => self.state.doc.personal.push(stored),
             }
         } else if let Some(stored) = self.state.stored_mut(local_id) {
+            get.collection.id = local_id.to_string();
             stored.collection = get.collection;
             stored.access = access;
             if let Some(origin) = stored.origin.as_mut() {
@@ -1414,5 +1565,177 @@ impl Drop for RestrustApp {
         if self.state.dirty {
             self.save_now();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::platform::{BrowserService, EguiClipboard, EhttpService, StorageService};
+
+    struct TestStorage;
+    impl StorageService for TestStorage {
+        fn save(&self, _: &WorkspaceDoc) {}
+        fn load(&self) -> Option<WorkspaceDoc> {
+            None
+        }
+        fn backup_corrupt(&self, _: String) {}
+        fn read_raw(&self) -> Option<String> {
+            None
+        }
+        fn describe(&self) -> String {
+            "test memory".into()
+        }
+    }
+    struct TestBrowser;
+    impl BrowserService for TestBrowser {
+        fn open_url(&self, _: &str) {}
+    }
+
+    fn test_app(ctx: &egui::Context) -> RestrustApp {
+        RestrustApp {
+            state: state::AppState::new(WorkspaceDoc::new()),
+            services: Arc::new(Services {
+                storage: Arc::new(TestStorage),
+                clipboard: Arc::new(EguiClipboard::new(ctx.clone())),
+                http: Arc::new(EhttpService::new(ctx.clone())),
+                browser: Arc::new(TestBrowser),
+            }),
+            admin: Arc::new(Mutex::new(AdminUi::default())),
+            inflight: HashMap::new(),
+            sync_pending: 0,
+            sync_errors: Vec::new(),
+            sync_worked: false,
+            applied_theme: None,
+            last_saved_hhmm: None,
+            last_list_entries: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn expired_execution_only_signs_out_the_session_that_sent_it() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx);
+        app.state.new_tab();
+        app.state.login.token = Some("new-session".into());
+        for token in ["old-session", "new-session"] {
+            let tab_id = app.state.active_tab().unwrap().id;
+            let def = app.state.active_request_def().unwrap();
+            app.handle_result(
+                InflightOp::Send {
+                    tab_id,
+                    def: Box::new(def),
+                    started: Instant::now(),
+                    relayed: true,
+                    session_token: Some(token.into()),
+                },
+                Ok(ehttp::Response {
+                    url: "http://server/api/v1/execute".into(),
+                    ok: false,
+                    status: 401,
+                    status_text: "Unauthorized".into(),
+                    headers: ehttp::Headers::default(),
+                    bytes: Vec::new(),
+                }),
+            );
+            assert_eq!(
+                app.state.login.token.as_deref(),
+                (token == "old-session").then_some("new-session")
+            );
+        }
+    }
+
+    #[test]
+    fn url_row_leaves_room_for_request_and_response_panes() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx);
+        app.state.new_tab();
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1000.0, 800.0),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let before = ui.cursor().top();
+                ui::request_editor::url_row(&mut app, ui, false);
+                assert!(
+                    ui.cursor().top() - before < 100.0,
+                    "URL row consumed the workspace height"
+                );
+                let before_row = ui.cursor();
+                let row =
+                    ui::common::row_sense(ui, false, egui::Color32::GRAY, egui::Color32::BLUE);
+                assert_eq!(row.rect.height(), theme::TREE_ROW_HEIGHT);
+                assert_eq!(
+                    ui.cursor(),
+                    before_row,
+                    "Row hit target consumed layout space"
+                );
+            });
+        });
+        output.textures_delta.clear();
+    }
+
+    #[test]
+    fn pulling_same_collection_id_from_two_servers_preserves_both_local_copies() {
+        let ctx = egui::Context::default();
+        let mut app = test_app(&ctx);
+        let mut remote = Collection::new("remote");
+        remote.id = "shared-remote-id".into();
+        for server in ["https://one", "https://two"] {
+            app.state.select_server(Some(server.into()));
+            app.apply_pulled(
+                server,
+                &remote.id,
+                "",
+                api::CollectionGetResponse {
+                    collection: remote.clone(),
+                    revision: 1,
+                    access: "owner".into(),
+                },
+            );
+        }
+        assert_eq!(app.state.doc.personal.len(), 2);
+        let first_id = app.state.doc.personal[0].collection.id.clone();
+        let second_id = app.state.doc.personal[1].collection.id.clone();
+        assert_ne!(first_id, second_id);
+        app.apply_pulled(
+            "https://two",
+            &remote.id,
+            &second_id,
+            api::CollectionGetResponse {
+                collection: remote.clone(),
+                revision: 2,
+                access: "owner".into(),
+            },
+        );
+        assert_eq!(app.state.doc.personal[1].collection.id, second_id);
+        assert_eq!(
+            app.state.doc.personal[0].sync,
+            SyncState::Synced { revision: 1 }
+        );
+        app.state.doc.personal[1].collection.name = "Edit during pull".into();
+        app.state.mark_collection_edited(&second_id);
+        app.apply_pulled(
+            "https://two",
+            &remote.id,
+            &second_id,
+            api::CollectionGetResponse {
+                collection: remote.clone(),
+                revision: 3,
+                access: "owner".into(),
+            },
+        );
+        assert_eq!(
+            app.state.doc.personal[1].collection.name,
+            "Edit during pull"
+        );
+        assert_eq!(
+            app.state.doc.personal[1].sync,
+            SyncState::PendingEdits { base_revision: 2 }
+        );
     }
 }

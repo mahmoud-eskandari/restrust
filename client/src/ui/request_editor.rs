@@ -27,6 +27,104 @@ const METHODS: [HttpMethod; 7] = [
     HttpMethod::Options,
 ];
 
+pub fn title_row(app: &mut RestrustApp, ui: &mut Ui) {
+    let Some(tab) = app.state.active_tab() else {
+        return;
+    };
+    let name = tab.label(&app.state.doc);
+    let location = match &tab.kind {
+        TabKind::Scratch(_) => "Unsaved request".to_string(),
+        TabKind::Saved { collection_id, .. } => app
+            .state
+            .find_stored(collection_id)
+            .map(|s| format!("{} /", s.collection.name))
+            .unwrap_or_default(),
+    };
+    egui::Frame::NONE
+        .inner_margin(egui::Margin::symmetric(10, 6))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                muted(ui, &location);
+                ui.label(RichText::new(name).strong());
+                if !can_edit(app) {
+                    muted(ui, "Read only");
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .button("Code")
+                        .on_hover_text("Generate a code snippet")
+                        .clicked()
+                    {
+                        if let Some(tab) = app.state.active_tab_mut() {
+                            tab.code_open = !tab.code_open;
+                        }
+                    }
+                    if ui
+                        .button("Save")
+                        .on_hover_text("Save request  Ctrl+S")
+                        .clicked()
+                    {
+                        app.save_active_request();
+                    }
+                });
+            });
+        });
+}
+
+fn can_edit(app: &RestrustApp) -> bool {
+    match app.state.active_tab().map(|tab| &tab.kind) {
+        Some(TabKind::Saved { collection_id, .. }) => app
+            .state
+            .find_stored(collection_id)
+            .is_some_and(|s| app.state.can_edit_tree(s)),
+        _ => true,
+    }
+}
+
+pub fn code_panel(app: &mut RestrustApp, ui: &mut Ui) {
+    use restrust_interchange::snippet::{self, Target};
+    ui.horizontal(|ui| {
+        ui.strong("Code snippet");
+        if ui.button("×").clicked() {
+            if let Some(tab) = app.state.active_tab_mut() {
+                tab.code_open = false;
+            }
+        }
+    });
+    let key = ui.scope_id().with("snippet_language");
+    let mut selected = ui.ctx().data(|d| d.get_temp::<usize>(key).unwrap_or(0));
+    let options = [
+        ("cURL", Target::Curl),
+        ("Rust · reqwest", Target::RustReqwest),
+        ("Python · requests", Target::PythonRequests),
+        ("JavaScript · fetch", Target::JsFetch),
+        ("Go · net/http", Target::GoNetHttp),
+    ];
+    egui::ComboBox::from_id_salt("snippet_language")
+        .selected_text(options[selected].0)
+        .show_ui(ui, |ui| {
+            for (index, (name, _)) in options.iter().enumerate() {
+                ui.selectable_value(&mut selected, index, *name);
+            }
+        });
+    ui.ctx().data_mut(|d| d.insert_temp(key, selected));
+    if let Some(mut def) = app.state.active_request_def() {
+        let (auth, _) = app.state.auth_and_scopes_for(&def);
+        def.auth = Some(AuthConfig { kind: auth });
+        let code = snippet::generate(&def, options[selected].1);
+        if ui.button("Copy snippet").clicked() {
+            app.services.clipboard.set_text(&code);
+            app.state.push_toast("Code snippet copied".into());
+        }
+        ui.separator();
+        egui::ScrollArea::both()
+            .id_salt("snippet_scroll")
+            .show(ui, |ui| {
+                ui.add(egui::Label::new(RichText::new(code).monospace()).selectable(true));
+            });
+    }
+}
+
 /// The URL row (36 px; wraps into two rows under 560 px, §1.4).
 pub fn url_row(app: &mut RestrustApp, ui: &mut Ui, narrow: bool) {
     let t = current_tokens(ui);
@@ -38,6 +136,7 @@ pub fn url_row(app: &mut RestrustApp, ui: &mut Ui, narrow: bool) {
                 return;
             };
             let mut def = original.clone();
+            let editable = can_edit(app);
             let sending = app
                 .state
                 .active_tab()
@@ -49,14 +148,15 @@ pub fn url_row(app: &mut RestrustApp, ui: &mut Ui, narrow: bool) {
             if narrow {
                 ui.set_min_height(theme::URL_ROW_HEIGHT);
                 ui.vertical(|ui| {
-                    ui.horizontal_centered(|ui| {
-                        method_combo(ui, &mut def.method);
+                    ui.horizontal(|ui| {
+                        ui.add_enabled_ui(editable, |ui| method_combo(ui, &mut def.method));
                         let label = if sending { "Sending…" } else { "Send" };
                         if busy_button(ui, "Send", label, sending).clicked() {
                             commit_and_send(app, &original, &def, sending);
                         }
                     });
-                    ui.add(
+                    ui.add_enabled(
+                        editable,
                         egui::TextEdit::singleline(&mut def.url)
                             .hint_text("https://api.example.com/path")
                             .font(egui::TextStyle::Monospace)
@@ -65,9 +165,10 @@ pub fn url_row(app: &mut RestrustApp, ui: &mut Ui, narrow: bool) {
                 });
             } else {
                 ui.set_min_height(theme::URL_ROW_HEIGHT);
-                ui.horizontal_centered(|ui| {
-                    method_combo(ui, &mut def.method);
-                    ui.add(
+                ui.horizontal(|ui| {
+                    ui.add_enabled_ui(editable, |ui| method_combo(ui, &mut def.method));
+                    ui.add_enabled(
+                        editable,
                         egui::TextEdit::singleline(&mut def.url)
                             .hint_text("https://api.example.com/path")
                             .font(egui::TextStyle::Monospace)
@@ -134,18 +235,18 @@ pub fn draw(app: &mut RestrustApp, ui: &mut Ui) {
                 return;
             };
             let mut def = def;
-            match app
+            let section = app
                 .state
                 .active_tab()
                 .map(|tab| tab.section)
-                .unwrap_or(SectionTab::Params)
-            {
+                .unwrap_or(SectionTab::Params);
+            ui.add_enabled_ui(can_edit(app), |ui| match section {
                 SectionTab::Params => params_section(ui, &mut def),
                 SectionTab::Body => body_section(app, ui, &mut def),
                 SectionTab::Headers => headers_section(ui, &mut def),
                 SectionTab::Auth => auth_section(app, ui, &mut def),
                 SectionTab::Settings => settings_section(app, ui, &mut def),
-            }
+            });
             if def != snapshot_of(app) {
                 let changed = def.clone();
                 app.state.apply_request_edit(&changed);
@@ -169,7 +270,7 @@ fn section_bar(app: &mut RestrustApp, ui: &mut Ui) {
             .active_tab()
             .map(|tab| tab.section)
             .unwrap_or(SectionTab::Params);
-        let active_color = ui.visuals().selection.bg_fill;
+        let active_color = current_tokens(ui).on_accent;
         let text_color = ui.visuals().text_color();
         let label = |text: String, active: bool| {
             egui::RichText::new(text)
@@ -296,15 +397,24 @@ fn params_section(ui: &mut Ui, def: &mut RequestDef) {
     }
     ui.ctx().data_mut(|d| d.insert_temp(tab_id, bulk));
     if bulk {
-        let mut text = rows_to_bulk(&def.query);
-        ui.add(
+        let text_id = tab_id.with("buffer");
+        let mut text = ui
+            .ctx()
+            .data(|d| d.get_temp::<String>(text_id))
+            .unwrap_or_else(|| rows_to_bulk(&def.query));
+        let response = ui.add(
             egui::TextEdit::multiline(&mut text)
                 .font(egui::TextStyle::Monospace)
                 .desired_rows(6)
                 .desired_width(ui.available_width()),
         );
-        def.query = bulk_to_rows(&text, &def.query);
+        if response.changed() {
+            def.query = bulk_to_rows(&text, &def.query);
+        }
+        ui.ctx().data_mut(|d| d.insert_temp(text_id, text));
     } else {
+        ui.ctx()
+            .data_mut(|d| d.remove::<String>(tab_id.with("buffer")));
         kv_editor(ui, "params", &mut def.query, true, &mut || {});
     }
 }
@@ -333,6 +443,7 @@ fn body_section(app: &mut RestrustApp, ui: &mut Ui, def: &mut RequestDef) {
             if ui
                 .selectable_label(same, RichText::new(label).strong())
                 .clicked()
+                && !same
             {
                 def.body = RequestBody {
                     kind,

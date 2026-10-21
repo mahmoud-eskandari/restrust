@@ -51,6 +51,8 @@ Paste a `curl` command to import it as a request. The parser understands the com
 
 ## Code snippets
 
+Open a request and choose **Code** beside **Save**. Pick a language in the side panel, then choose **Copy snippet** to copy the generated code, including inherited authentication.
+
 Any request can be generated as a ready-to-run snippet for:
 
 - cURL

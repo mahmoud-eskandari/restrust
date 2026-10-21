@@ -32,11 +32,8 @@ pub fn handle_shortcuts(app: &mut RestrustApp, ctx: &egui::Context) {
     let cmd = |key: egui::Key| ctx.input(|i| i.modifiers.command && i.key_pressed(key));
     let alt = |key: egui::Key| ctx.input(|i| i.modifiers.alt && i.key_pressed(key));
 
-    if cmd(egui::Key::Enter) {
-        app.send_active_request();
-    }
     if cmd(egui::Key::S) {
-        app.save_now();
+        app.save_active_request();
     }
     // Browsers usually eat Ctrl+T / Ctrl+W; Alt variants are bound everywhere.
     if cmd(egui::Key::T) || alt(egui::Key::T) {
@@ -54,7 +51,7 @@ pub fn handle_shortcuts(app: &mut RestrustApp, ctx: &egui::Context) {
         }
     }
     if cmd(egui::Key::B) {
-        app.state.sidebar_visible = !app.state.sidebar_visible;
+        toggle_sidebar(app, ctx.content_rect().width());
     }
     if cmd(egui::Key::Comma) {
         app.state.dialog = DialogState::Settings;
@@ -135,6 +132,15 @@ pub fn handle_shortcuts(app: &mut RestrustApp, ctx: &egui::Context) {
             // Modals consume Esc themselves; this covers custom overlays.
             app.state.dialog = DialogState::None;
         }
+    }
+}
+
+pub fn toggle_sidebar(app: &mut RestrustApp, width: f32) {
+    if width < WIDE {
+        app.state.sidebar_overlay = !app.state.sidebar_overlay;
+    } else {
+        app.state.sidebar_visible = !app.state.sidebar_visible;
+        app.state.sidebar_overlay = false;
     }
 }
 
@@ -255,6 +261,14 @@ fn main_area(app: &mut RestrustApp, ui: &mut Ui) {
     }
 
     tab_bar(app, ui);
+    request_editor::title_row(app, ui);
+    if app.state.active_tab().is_some_and(|t| t.code_open) {
+        egui::Panel::right("code_snippet")
+            .resizable(true)
+            .default_size(300.0)
+            .size_range(220.0..=500.0)
+            .show(ui, |ui| request_editor::code_panel(app, ui));
+    }
 
     let narrow = ui.available_width() < 560.0;
     request_editor::url_row(app, ui, narrow);
@@ -278,7 +292,9 @@ fn main_area(app: &mut RestrustApp, ui: &mut Ui) {
             .default_size((ui.available_height() * 0.55).max(120.0))
             .min_size(120.0)
             .show(ui, |ui| {
-                request_editor::draw(app, ui);
+                egui::ScrollArea::vertical()
+                    .id_salt("request_editor_scroll")
+                    .show(ui, |ui| request_editor::draw(app, ui));
             });
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
@@ -311,7 +327,9 @@ fn tab_bar(app: &mut RestrustApp, ui: &mut Ui) {
                                 let active = app.state.active_tab == Some(index);
                                 let resp = ui.selectable_label(
                                     active,
-                                    egui::RichText::new(format!(" {label} ")).strong(),
+                                    egui::RichText::new(format!(" {label} "))
+                                        .strong()
+                                        .color(if active { t.on_accent } else { t.text }),
                                 );
                                 if resp.clicked() {
                                     app.state.active_tab = Some(index);

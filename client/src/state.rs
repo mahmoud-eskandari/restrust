@@ -112,6 +112,9 @@ pub struct Tab {
     pub body_view: BodyView,
     pub wrap: bool,
     pub responses: VecDeque<CachedResponse>,
+    pub response_index: Option<usize>,
+    pub send_error: Option<String>,
+    pub code_open: bool,
     pub response_collapsed: bool,
     /// Params bulk-edit textarea toggle.
     pub bulk_edit: bool,
@@ -127,6 +130,9 @@ impl Tab {
             body_view: BodyView::Pretty,
             wrap: true,
             responses: VecDeque::new(),
+            response_index: None,
+            send_error: None,
+            code_open: false,
             response_collapsed: false,
             bulk_edit: false,
         }
@@ -154,6 +160,12 @@ impl Tab {
                 .unwrap_or_else(|| "(deleted request)".to_string()),
         }
     }
+
+    pub fn displayed_response(&self) -> Option<&CachedResponse> {
+        self.response_index
+            .and_then(|i| self.responses.get(i))
+            .or_else(|| self.responses.back())
+    }
 }
 
 // --- login / server ---------------------------------------------------------------
@@ -178,6 +190,14 @@ pub struct LoginState {
     pub organizations: Vec<SessionOrg>,
     pub status: ServerStatus,
     pub last_synced: Option<String>,
+}
+
+#[derive(Default)]
+pub struct ServerSession {
+    pub login: LoginState,
+    pub sync_info: HashMap<String, SyncInfo>,
+    pub grants: HashMap<String, Vec<ShareGrant>>,
+    pub slugs: HashMap<String, String>,
 }
 
 impl LoginState {
@@ -221,6 +241,7 @@ pub struct SignInDialog {
     pub error: Option<String>,
     pub providers: Vec<ProviderDto>,
     pub providers_loaded: bool,
+    pub providers_server: Option<String>,
     /// Set when fetching providers failed (section is skipped).
     pub providers_failed: bool,
     /// Provider whose browser flow is in progress (desktop paste-token flow).
@@ -240,6 +261,7 @@ impl SignInDialog {
             error: None,
             providers: Vec::new(),
             providers_loaded: false,
+            providers_server: None,
             providers_failed: false,
             provider_pending: None,
             paste_token: String::new(),
@@ -543,6 +565,9 @@ pub struct AppState {
     pub banners: Vec<Banner>,
     pub toasts: Vec<Toast>,
     pub login: LoginState,
+    pub active_server: Option<String>,
+    /// Inactive connections remain signed in while another server is selected.
+    pub server_sessions: HashMap<String, ServerSession>,
     pub dialog: DialogState,
     pub dirty: bool,
     pub last_edit: Option<Instant>,
@@ -559,8 +584,15 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(doc: WorkspaceDoc) -> Self {
+    pub fn new(mut doc: WorkspaceDoc) -> Self {
+        if let Some(server) = doc.settings.server_url.clone().filter(|s| !s.is_empty()) {
+            if !doc.settings.servers.contains(&server) {
+                doc.settings.servers.push(server);
+            }
+        }
         AppState {
+            active_server: doc.settings.server_url.clone(),
+            server_sessions: HashMap::new(),
             doc,
             tabs: Vec::new(),
             active_tab: None,
@@ -596,6 +628,55 @@ impl AppState {
     pub fn mark_edited(&mut self) {
         self.dirty = true;
         self.last_edit = Some(Instant::now());
+    }
+
+    pub fn select_server(&mut self, server: Option<String>) {
+        if self.active_server == server {
+            return;
+        }
+        if let Some(previous) = self.active_server.take() {
+            self.server_sessions.insert(
+                previous,
+                ServerSession {
+                    login: std::mem::take(&mut self.login),
+                    sync_info: std::mem::take(&mut self.sync_info),
+                    grants: std::mem::take(&mut self.grants_known),
+                    slugs: std::mem::take(&mut self.slug_known),
+                },
+            );
+        }
+        let session = server
+            .as_ref()
+            .and_then(|s| self.server_sessions.remove(s))
+            .unwrap_or_default();
+        self.login = session.login;
+        self.sync_info = session.sync_info;
+        self.grants_known = session.grants;
+        self.slug_known = session.slugs;
+        self.active_server = server;
+        self.namespace = NamespaceSelection::Personal;
+        self.selected = None;
+        self.renaming = None;
+        self.context_menu_node = None;
+        self.admin_open = false;
+        self.sync_in_flight = false;
+    }
+
+    pub fn server_choices(&self) -> Vec<String> {
+        let mut servers = self.doc.settings.servers.clone();
+        servers.extend(self.server_sessions.keys().cloned());
+        servers.extend(self.active_server.iter().cloned());
+        servers.sort();
+        servers.dedup();
+        servers
+    }
+
+    pub fn belongs_to_active_server(&self, stored: &StoredCollection) -> bool {
+        stored
+            .origin
+            .as_ref()
+            .map(|o| Some(o.server_url.as_str()) == self.active_server.as_deref())
+            .unwrap_or(false)
     }
 
     /// Marks the stored collection as edited (sync PendingEdits) and the
@@ -647,6 +728,13 @@ impl AppState {
         if stored.sync == SyncState::Local && stored.origin.is_none() {
             return Access::Owner;
         }
+        if !self.belongs_to_active_server(stored) {
+            return match stored.access {
+                Some(AccessLevel::ReadOnly) => Access::Read,
+                Some(AccessLevel::FullAccess) => Access::Full,
+                None => Access::Owner,
+            };
+        }
         match self
             .sync_info
             .get(
@@ -683,19 +771,27 @@ impl AppState {
             .personal
             .iter()
             .chain(self.doc.organizations.iter())
-            .find(|s| s.sync == SyncState::Revoked)
+            .find(|s| s.sync == SyncState::Revoked && self.belongs_to_active_server(s))
             .map(|s| s.collection.name.clone())
     }
 
     /// Collections visible in the sidebar for the active namespace.
     pub fn visible_collections(&self) -> Vec<&StoredCollection> {
         match &self.namespace {
-            NamespaceSelection::Personal => self.doc.personal.iter().collect(),
+            NamespaceSelection::Personal => self
+                .doc
+                .personal
+                .iter()
+                .filter(|s| s.origin.is_none() || self.belongs_to_active_server(s))
+                .collect(),
             NamespaceSelection::Organization(org_id) => self
                 .doc
                 .organizations
                 .iter()
                 .filter(|s| {
+                    if !self.belongs_to_active_server(s) {
+                        return false;
+                    }
                     s.origin
                         .as_ref()
                         .map(|o| o.namespace.id == *org_id)
@@ -776,6 +872,8 @@ impl AppState {
     /// Caches a response on its tab (keeping the newest 10).
     pub fn cache_response(&mut self, tab_id: u64, cached: CachedResponse) {
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
+            tab.response_index = None;
+            tab.send_error = None;
             tab.responses.push_back(cached);
             while tab.responses.len() > RESPONSE_CACHE_LIMIT {
                 tab.responses.pop_front();
@@ -825,6 +923,12 @@ impl AppState {
                 collection_id,
                 request_id,
             } => {
+                if !self
+                    .find_stored(collection_id)
+                    .is_some_and(|s| self.can_edit_tree(s))
+                {
+                    return false;
+                }
                 let collection_id = collection_id.clone();
                 let request_id = request_id.clone();
                 let found = find_stored_mut(&mut self.doc, &collection_id)
@@ -1068,6 +1172,7 @@ mod tests {
     #[test]
     fn access_classification() {
         let mut state = AppState::new(WorkspaceDoc::new());
+        state.select_server(Some("https://s".into()));
         let mut local = stored("l1");
         local.sync = SyncState::Local;
         assert_eq!(state.access_of(&local), Access::Owner);
@@ -1107,11 +1212,125 @@ mod tests {
     #[test]
     fn revoked_collection_found_for_pill() {
         let mut state = AppState::new(WorkspaceDoc::new());
+        state.select_server(Some("https://s".into()));
         assert!(state.revoked_collection().is_none());
         let mut revoked = stored("r1");
         revoked.sync = SyncState::Revoked;
+        revoked.origin = Some(ServerOrigin {
+            server_url: "https://s".into(),
+            collection_id: "r1".into(),
+            namespace: restrust_core::workspace_doc::NamespaceRef {
+                kind: restrust_core::workspace_doc::NamespaceKind::Organization,
+                id: "org".into(),
+                name: "Org".into(),
+            },
+        });
         state.doc.organizations.push(revoked);
         assert_eq!(state.revoked_collection().unwrap(), "col r1");
+        state.select_server(Some("https://other".into()));
+        assert!(state.revoked_collection().is_none());
+    }
+
+    #[test]
+    fn switching_servers_keeps_independent_sessions_roles_and_collections() {
+        let mut state = AppState::new(WorkspaceDoc::new());
+        state.doc.personal.push(stored("local"));
+        for server in ["https://one", "https://two"] {
+            let mut collection = stored(server);
+            collection.origin = Some(ServerOrigin {
+                server_url: server.into(),
+                collection_id: "same-server-id".into(),
+                namespace: restrust_core::workspace_doc::NamespaceRef {
+                    kind: restrust_core::workspace_doc::NamespaceKind::Personal,
+                    id: "same-user-id".into(),
+                    name: "User".into(),
+                },
+            });
+            state.doc.personal.push(collection);
+        }
+        state.select_server(Some("https://one".into()));
+        state.login.token = Some("token-one".into());
+        state.login.user = Some(SessionUser {
+            system_role: "admin".into(),
+            ..Default::default()
+        });
+        state.sync_info.insert(
+            "same-server-id".into(),
+            SyncInfo {
+                access: "read".into(),
+            },
+        );
+        state
+            .slug_known
+            .insert("same-server-id".into(), "one-publication".into());
+        state.select_server(Some("https://two".into()));
+        assert!(!state.login.is_admin());
+        assert!(state.login.token.is_none());
+        assert!(state.slug_known.is_empty());
+        assert_eq!(
+            state
+                .visible_collections()
+                .iter()
+                .map(|s| s.collection.name.as_str())
+                .collect::<Vec<_>>(),
+            ["col local", "col https://two"]
+        );
+        assert_eq!(state.access_of(&state.doc.personal[2]), Access::Owner);
+        state.login.token = Some("token-two".into());
+        state.select_server(Some("https://one".into()));
+        assert_eq!(state.login.token.as_deref(), Some("token-one"));
+        assert!(state.login.is_admin());
+        assert_eq!(state.access_of(&state.doc.personal[1]), Access::Read);
+        assert_eq!(state.slug_known["same-server-id"], "one-publication");
+        assert_eq!(
+            state.server_sessions["https://two"].login.token.as_deref(),
+            Some("token-two")
+        );
+        state.select_server(None);
+        assert_eq!(state.visible_collections().len(), 1);
+        assert!(!state.doc.to_json().unwrap().contains("token-one"));
+    }
+
+    #[test]
+    fn recent_response_selection_preserves_order_even_with_identical_timestamps() {
+        let mut state = AppState::new(WorkspaceDoc::new());
+        state.new_tab();
+        let id = state.active_tab().unwrap().id;
+        state.cache_response(id, response(201));
+        state.cache_response(id, response(202));
+        state.active_tab_mut().unwrap().response_index = Some(0);
+        assert_eq!(
+            state
+                .active_tab()
+                .unwrap()
+                .displayed_response()
+                .unwrap()
+                .meta
+                .status,
+            201
+        );
+        assert_eq!(
+            state
+                .active_tab()
+                .unwrap()
+                .responses
+                .back()
+                .unwrap()
+                .meta
+                .status,
+            202
+        );
+        state.cache_response(id, response(203));
+        assert_eq!(
+            state
+                .active_tab()
+                .unwrap()
+                .displayed_response()
+                .unwrap()
+                .meta
+                .status,
+            203
+        );
     }
 
     #[test]

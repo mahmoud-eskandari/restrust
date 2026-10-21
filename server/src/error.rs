@@ -28,9 +28,14 @@ pub enum ApiError {
     },
     #[error("{0}")]
     Internal(String),
+    #[error("{0}")]
+    Upstream(String),
 }
 
 impl ApiError {
+    pub fn upstream(msg: impl Into<String>) -> Self {
+        Self::Upstream(msg.into())
+    }
     pub fn bad_request(msg: impl Into<String>) -> Self {
         ApiError::BadRequest(msg.into())
     }
@@ -60,6 +65,7 @@ impl ApiError {
             ApiError::NotFound(_) => "not_found",
             ApiError::Conflict { .. } => "conflict",
             ApiError::Internal(_) => "internal",
+            ApiError::Upstream(_) => "upstream_error",
         }
     }
 
@@ -71,6 +77,7 @@ impl ApiError {
             ApiError::NotFound(_) => StatusCode::NOT_FOUND,
             ApiError::Conflict { .. } => StatusCode::CONFLICT,
             ApiError::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            ApiError::Upstream(_) => StatusCode::BAD_GATEWAY,
         }
     }
 
@@ -81,6 +88,7 @@ impl ApiError {
             | ApiError::AccessDenied(m)
             | ApiError::NotFound(m)
             | ApiError::Internal(m) => m,
+            ApiError::Upstream(m) => m,
             ApiError::Conflict { message, .. } => message,
         }
     }

@@ -1,10 +1,10 @@
 # Sync and sharing
 
-restrust separates local work from server-backed collaboration: everything you do locally keeps working with no account and no server, and an optional self-hosted server adds synchronization, sharing with users and organizations, and public publishing. This page explains namespaces, what happens offline, how conflicting edits are resolved, the permission model, and exactly what revocation does and does not do.
+restrust separates local work from server-backed collaboration: desktop request execution and local editing work with no account or server, and an optional self-hosted server adds synchronization, sharing with users and organizations, and public publishing. This page explains namespaces, what happens offline, how conflicting edits are resolved, the permission model, and exactly what revocation does and does not do.
 
 ## Independent local operation
 
-The client is a complete tool on its own. Install it and start working — there is no registration, no login gate, and no mandatory server. Collections, folders, requests, environments, variables, and history are all persisted locally (a JSON workspace file on desktop, browser local storage on web) and survive restarts. The server is an add-on you can connect to later, and disconnecting from it never removes or locks your local data.
+The desktop client is a complete tool on its own: install it and start working without registration or a server. Web clients require a signed-in server connection for request execution. Collections, folders, requests, environments, variables, and history are all persisted locally (a JSON workspace file on desktop, browser local storage on web) and survive restarts. Disconnecting from a server preserves your local data.
 
 ## Namespaces
 
@@ -21,11 +21,13 @@ Signing in to a server does not silently upload your personal work:
 
 - Personal collections stay local until you choose **Enable sync** on them. After that, edits are pushed to the server and the collection keeps a server revision.
 - Organization collections you can see are synced as part of your membership.
-- The client only talks to the server you configured; the server URL can be changed or cleared at any time, and local work is unaffected.
+- Desktop clients can join multiple servers using the server menu beside the app menu. Choose **Join another server…**, sign in, and switch between connections without signing out of the others. The selected server controls synchronization, organization membership, sharing, and administration. Local collections remain available across servers.
+- **Remember this server** saves its address. Tokens remain in memory and must be renewed by signing in after restarting the client. Signing out affects only the selected connection. **Local workspace** returns to local collections while retaining the other sessions.
+- Web clients use the server on their current origin. Browser sends always execute there; desktop sends execute directly from the desktop.
 
 ## Offline editing and resynchronization
 
-A synchronized collection is fully usable while the server is unreachable: you can read it, edit it, add requests, and send requests. Edits made offline are marked as pending and kept locally. When the server becomes reachable again, the client pushes pending edits automatically. If the server stays unreachable, nothing is lost and nothing is deleted — your edits remain local and sync when possible.
+A synchronized collection is fully usable while the server is unreachable: you can read it, edit it, add requests, and send requests from desktop. Browser sends require the execution server to be reachable. Edits made offline are marked as pending and kept locally. When the server becomes reachable again, choose **Sync Now** to push pending edits. If the server stays unreachable, nothing is lost and nothing is deleted — your edits remain local and sync when possible.
 
 ## Conflict policy
 

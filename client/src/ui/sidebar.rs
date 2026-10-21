@@ -159,8 +159,16 @@ fn namespace_switcher(app: &mut RestrustApp, ui: &mut Ui) {
     ui.add_space(theme::GAP_TIGHT);
     let label = match &app.state.namespace {
         NamespaceSelection::Personal => "Personal".to_string(),
-        NamespaceSelection::Organization(name) => name.clone(),
+        NamespaceSelection::Organization(id) => app
+            .state
+            .login
+            .organizations
+            .iter()
+            .find(|o| o.id == *id)
+            .map(|o| o.name.clone())
+            .unwrap_or_else(|| "Organization".into()),
     };
+    let active_server = app.state.active_server.clone();
     let count_for = |org_id: &str| {
         app.state
             .doc
@@ -169,16 +177,20 @@ fn namespace_switcher(app: &mut RestrustApp, ui: &mut Ui) {
             .filter(|s| {
                 s.origin
                     .as_ref()
-                    .map(|o| o.namespace.id == org_id)
+                    .map(|o| {
+                        o.namespace.id == org_id
+                            && Some(o.server_url.as_str()) == active_server.as_deref()
+                    })
                     .unwrap_or(false)
             })
             .count()
     };
     ui.menu_button(format!("{label} ▾"), |ui| {
         ui.set_min_width(240.0);
-        let mut selected = NamespaceSelection::Personal;
+        let mut selected = app.state.namespace.clone();
         if ui.button("Personal").clicked() {
             selected = NamespaceSelection::Personal;
+            ui.close();
         }
         for org in app.state.login.organizations.clone() {
             let n = count_for(&org.id);
@@ -187,6 +199,7 @@ fn namespace_switcher(app: &mut RestrustApp, ui: &mut Ui) {
                 .clicked()
             {
                 selected = NamespaceSelection::Organization(org.id);
+                ui.close();
             }
         }
         app.state.namespace = selected;

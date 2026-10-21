@@ -128,9 +128,12 @@ fn default_export_path(name: &str) -> String {
 
 // --- generic modal helpers -----------------------------------------------------------
 
-fn centered(ctx: &Context, _width: f32) -> egui::Pos2 {
+fn centered(ctx: &Context, width: f32) -> egui::Pos2 {
     let screen = ctx.content_rect();
-    egui::pos2(screen.left(), screen.top() + screen.height() * 0.15)
+    egui::pos2(
+        screen.left() + ((screen.width() - width - 32.0) * 0.5).max(8.0),
+        screen.top() + screen.height() * 0.15,
+    )
 }
 
 fn current_tokens_ctx(ctx: &Context) -> crate::theme::ThemeTokens {
@@ -145,7 +148,7 @@ fn current_tokens_ctx(ctx: &Context) -> crate::theme::ThemeTokens {
 
 fn sign_in(app: &mut RestrustApp, ctx: &egui::Context, mut dialog: SignInDialog) {
     let t = current_tokens_ctx(ctx);
-    let providers_needed = !dialog.providers_loaded && !dialog.providers_failed;
+    let mut editing_server = false;
     let response = Modal::new(egui::Id::unique("sign_in_dialog"))
         .area(egui::Area::new(egui::Id::unique("sign_in_dialog")).fixed_pos(centered(ctx, 420.0)))
         .frame(dialog_frame(&t))
@@ -156,7 +159,8 @@ fn sign_in(app: &mut RestrustApp, ctx: &egui::Context, mut dialog: SignInDialog)
 
             section_label(ui, "Server");
             ui.label("Server URL");
-            ui.text_edit_singleline(&mut dialog.server_url);
+            if IS_WASM { dialog.server_url = app.server_url(); }
+            editing_server = ui.add_enabled(!IS_WASM && !dialog.in_flight && !dialog.completing, egui::TextEdit::singleline(&mut dialog.server_url).hint_text("https://restrust.example.com")).has_focus();
             ui.checkbox(&mut dialog.remember, "Remember this server");
             ui.separator();
 
@@ -165,7 +169,8 @@ fn sign_in(app: &mut RestrustApp, ctx: &egui::Context, mut dialog: SignInDialog)
             ui.text_edit_singleline(&mut dialog.username);
             ui.label("Password");
             ui.add(egui::TextEdit::singleline(&mut dialog.password).password(true));
-            if busy_button(ui, "Sign in", "Signing in…", dialog.in_flight).clicked() {
+            let can_login = !dialog.username.trim().is_empty() && !dialog.password.is_empty() && !dialog.server_url.trim().is_empty() && !dialog.completing;
+            if ui.add_enabled_ui(can_login, |ui| busy_button(ui, "Sign in", "Signing in…", dialog.in_flight)).inner.clicked() {
                 dialog.in_flight = true;
                 dialog.error = None;
                 let server = normalize_server(&dialog.server_url);
@@ -243,12 +248,14 @@ fn sign_in(app: &mut RestrustApp, ctx: &egui::Context, mut dialog: SignInDialog)
         app.state.dialog = DialogState::None;
         return;
     }
-    if providers_needed && !dialog.server_url.trim().is_empty() {
-        let fetched_flag = egui::Id::unique("signin_providers_fetched");
-        let already = ctx.data(|d| d.get_temp::<bool>(fetched_flag).unwrap_or(false));
-        if !already {
-            ctx.data_mut(|d| d.insert_temp(fetched_flag, true));
-            let server = normalize_server(&dialog.server_url);
+    let server = normalize_server(&dialog.server_url);
+    if !editing_server && dialog.providers_server.as_deref() != Some(&server) {
+        dialog.providers.clear();
+        dialog.providers_loaded = false;
+        dialog.providers_failed = false;
+        dialog.provider_pending = None;
+        dialog.providers_server = Some(server.clone());
+        if url::Url::parse(&server).is_ok() {
             app.fetch_providers(server);
         }
     }
@@ -756,13 +763,6 @@ fn settings(app: &mut RestrustApp, ctx: &egui::Context) {
     let t = current_tokens_ctx(ctx);
     let mut close = false;
     let mut theme_pick = app.state.doc.settings.theme.clone();
-    let mut server_url = app
-        .state
-        .doc
-        .settings
-        .server_url
-        .clone()
-        .unwrap_or_default();
     Modal::new(egui::Id::unique("settings_dialog"))
         .area(egui::Area::new(egui::Id::unique("settings_dialog")).fixed_pos(centered(ctx, 480.0)))
         .frame(dialog_frame(&t))
@@ -773,14 +773,26 @@ fn settings(app: &mut RestrustApp, ctx: &egui::Context) {
 
             section_label(ui, "Appearance");
             ui.horizontal(|ui| {
-                let _ = ui.radio(theme_pick == "light", "Light");
-                let _ = ui.radio(theme_pick == "dark", "Dark");
+                ui.radio_value(&mut theme_pick, "light".into(), "Light");
+                ui.radio_value(&mut theme_pick, "dark".into(), "Dark");
             });
             ui.add_space(theme::GAP_SECTION);
 
             section_label(ui, "Server");
             ui.label("Server URL");
-            ui.text_edit_singleline(&mut server_url);
+            ui.label(if app.server_url().is_empty() {
+                "Local workspace".into()
+            } else {
+                app.server_url()
+            });
+            muted(
+                ui,
+                if IS_WASM {
+                    "Requests are sent through this server."
+                } else {
+                    "Use the server menu to join or switch servers."
+                },
+            );
             if app.state.login.signed_in() {
                 let username = app
                     .state
@@ -821,16 +833,8 @@ fn settings(app: &mut RestrustApp, ctx: &egui::Context) {
     if theme_pick != "dark" && theme_pick != "light" {
         theme_pick = "dark".to_string();
     }
-    let trimmed_server = server_url.trim().to_string();
-    if app.state.doc.settings.theme != theme_pick
-        || app.state.doc.settings.server_url.as_deref() != Some(trimmed_server.as_str())
-    {
+    if app.state.doc.settings.theme != theme_pick {
         app.state.doc.settings.theme = theme_pick.clone();
-        app.state.doc.settings.server_url = if trimmed_server.is_empty() {
-            None
-        } else {
-            Some(trimmed_server)
-        };
         app.state.mark_edited();
     }
 }

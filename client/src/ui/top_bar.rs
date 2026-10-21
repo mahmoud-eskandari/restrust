@@ -21,16 +21,91 @@ pub fn draw(app: &mut RestrustApp, root: &mut egui::Ui) {
                 ui.add_space(theme::GAP_INNER);
                 sidebar_toggle(app, ui);
                 app_menu(app, ui);
-                environment_selector(app, ui);
+                if !crate::platform::IS_WASM {
+                    server_selector(app, ui);
+                }
+                if ui.ctx().content_rect().width() >= 900.0 {
+                    environment_selector(app, ui);
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     account_button(app, ui);
-                    help_menu(app, ui);
-                    settings_button(app, ui);
+                    if ui.ctx().content_rect().width() >= 900.0 {
+                        help_menu(app, ui);
+                        settings_button(app, ui);
+                    }
                     administration_menu(app, ui);
                     sync_pill(app, ui);
                 });
             });
         });
+}
+
+fn server_selector(app: &mut RestrustApp, ui: &mut Ui) {
+    let active = app.state.active_server.clone();
+    let label = active
+        .as_deref()
+        .map(RestrustApp::host_of)
+        .unwrap_or_else(|| "Local workspace".into());
+    let label = if label.chars().count() > 24 {
+        format!("{}…", label.chars().take(23).collect::<String>())
+    } else {
+        label
+    };
+    ui.menu_button(format!("{label} ▾"), |ui| {
+        ui.set_min_width(250.0);
+        muted(ui, "Servers");
+        let ready = app.can_switch_server();
+        if ui
+            .add_enabled(
+                ready,
+                egui::Button::new("Local workspace").selected(active.is_none()),
+            )
+            .clicked()
+        {
+            app.switch_server(None);
+            ui.close();
+        }
+        for server in app.state.server_choices() {
+            let connected = if active.as_ref() == Some(&server) {
+                app.state.login.signed_in()
+            } else {
+                app.state
+                    .server_sessions
+                    .get(&server)
+                    .is_some_and(|s| s.login.signed_in())
+            };
+            let label = format!(
+                "{}{}",
+                RestrustApp::host_of(&server),
+                if connected { " · signed in" } else { "" }
+            );
+            if ui
+                .add_enabled(
+                    ready,
+                    egui::Button::new(label).selected(active.as_ref() == Some(&server)),
+                )
+                .on_hover_text(&server)
+                .clicked()
+            {
+                app.switch_server(Some(server.clone()));
+                if !app.state.login.signed_in() {
+                    app.state.dialog = DialogState::SignIn(Box::new(
+                        crate::state::SignInDialog::new(Some(server)),
+                    ));
+                }
+                ui.close();
+            }
+        }
+        ui.separator();
+        if ui
+            .add_enabled(ready, egui::Button::new("Join another server…"))
+            .on_disabled_hover_text("Wait for the current server operation to finish")
+            .clicked()
+        {
+            app.state.dialog = DialogState::SignIn(Box::new(crate::state::SignInDialog::new(None)));
+            ui.close();
+        }
+    });
 }
 
 fn current_tokens_ctx(ctx: &Context) -> crate::theme::ThemeTokens {
@@ -43,8 +118,7 @@ fn current_tokens_ctx(ctx: &Context) -> crate::theme::ThemeTokens {
 
 fn sidebar_toggle(app: &mut RestrustApp, ui: &mut Ui) {
     if ghost_toggle(ui, "☰", app.state.sidebar_visible, "Toggle sidebar  Ctrl+B").clicked() {
-        app.state.sidebar_visible = !app.state.sidebar_visible;
-        app.state.sidebar_overlay = false;
+        super::toggle_sidebar(app, ui.ctx().content_rect().width());
     }
 }
 
