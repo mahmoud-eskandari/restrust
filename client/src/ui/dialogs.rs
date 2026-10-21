@@ -1376,7 +1376,10 @@ fn save_scratch_into(
                     crate::state::TabKind::Scratch(def) => Some((**def).clone()),
                     _ => None,
                 });
-            if let Some(def) = scratch {
+            if let Some(mut def) = scratch {
+                if def.name.trim().is_empty() {
+                    def.name = "Untitled request".to_string();
+                }
                 let request_id = def.id.clone();
                 if let Some(stored) = app.state.stored_mut(&cid) {
                     stored.collection.insert_item(

@@ -71,13 +71,16 @@ pub fn draw(app: &mut RestrustApp, ui: &mut Ui) {
                             |ui| {
                                 ui.add_space(theme::GAP_TIGHT);
                                 method_chip(ui, entry.request.method);
-                                ui.label(
-                                    RichText::new(format!(
-                                        "{} · {}",
-                                        host_and_path(&entry.request.url),
-                                        relative(&entry.time)
-                                    ))
-                                    .size(12.0),
+                                ui.add(
+                                    egui::Label::new(
+                                        RichText::new(format!(
+                                            "{} · {}",
+                                            host_and_path(&entry.request.url),
+                                            relative(&entry.time)
+                                        ))
+                                        .size(12.0),
+                                    )
+                                    .selectable(false),
                                 );
                             },
                         );
