@@ -53,7 +53,7 @@ cargo clippy --workspace --all-targets -- -D warnings   # lint
 cargo test --workspace               # tests
 ```
 
-CI runs formatting, linting, and tests on Windows, macOS, and Linux, checks and builds the browser client for `wasm32-unknown-unknown`, and produces a release server binary — see [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
+CI validates formatting, lint, and workflows, tests on Windows x64, macOS Intel/Apple Silicon, and Linux x64/ARM64, and builds desktop, server, and browser release archives with SHA-256 checksums. Version tags run the same checks before creating a draft GitHub release. See [Building and releasing](docs/releases.md) and [`.github/workflows/ci.yml`](.github/workflows/ci.yml).
 
 ## License
 

@@ -4,6 +4,8 @@ mydocs/
 # Build output
 target/
 client/dist/
+dist/
+__pycache__/
 
 # ZCode local agent definitions
 .zcode/
