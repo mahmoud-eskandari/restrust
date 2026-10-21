@@ -17,13 +17,28 @@ pub fn draw(app: &mut RestrustApp, ui: &mut Ui, _tab_id: u64) {
             let Some(tab) = app.state.active_tab() else {
                 return;
             };
-            let Some(cached) = tab.responses.back().cloned() else {
+            if app.state.sending_tabs.contains(&tab.id) {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Sending request…");
+                });
+                return;
+            }
+            if let Some(error) = &tab.send_error {
+                ui.colored_label(t.danger, "Request failed");
+                ui.label(error);
+                return;
+            }
+            let Some(cached) = tab.displayed_response().cloned() else {
                 empty(ui);
                 return;
             };
             meta_row(app, ui, &cached);
             tabs_row(app, ui);
-            body_or_headers(app, ui, &cached);
+            egui::ScrollArea::both()
+                .id_salt("response_scroll")
+                .auto_shrink(false)
+                .show(ui, |ui| body_or_headers(app, ui, &cached));
         });
 }
 
@@ -38,7 +53,7 @@ pub fn collapsed_stub(app: &mut RestrustApp, ui: &mut Ui) {
             let Some(tab) = app.state.active_tab() else {
                 return;
             };
-            match tab.responses.back().cloned() {
+            match tab.displayed_response().cloned() {
                 Some(cached) => meta_row(app, ui, &cached),
                 None => empty(ui),
             }
@@ -57,7 +72,7 @@ fn empty(ui: &mut Ui) {
 #[allow(clippy::too_many_lines)]
 fn meta_row(app: &mut RestrustApp, ui: &mut Ui, cached: &CachedResponse) {
     let t = current_tokens(ui);
-    ui.horizontal_centered(|ui| {
+    ui.horizontal(|ui| {
         ui.set_min_height(theme::RESPONSE_META_HEIGHT);
         let color = theme::status_class_color(cached.meta.status, &t);
         status_pill(
@@ -129,18 +144,9 @@ fn meta_row(app: &mut RestrustApp, ui: &mut Ui, cached: &CachedResponse) {
                             .clicked()
                         {
                             if let Some(tab) = app.state.active_tab_mut() {
-                                let _ = index;
-                                let _ = &mut tab.responses;
-                                // Promote the picked entry to the back.
-                                if let Some(pos) = tab
-                                    .responses
-                                    .iter()
-                                    .position(|c| c.meta.time == entry.meta.time)
-                                {
-                                    let picked = tab.responses.remove(pos).unwrap();
-                                    tab.responses.push_back(picked);
-                                }
+                                tab.response_index = Some(tab.responses.len() - 1 - index);
                             }
+                            ui.close();
                         }
                     }
                 });
@@ -283,14 +289,14 @@ fn body_or_headers(app: &mut RestrustApp, ui: &mut Ui, cached: &CachedResponse) 
 }
 
 fn raw(ui: &mut Ui, text: &str, wrap: bool) {
-    let mut buffer = text.to_string();
-    let mut edit = egui::TextEdit::multiline(&mut buffer)
+    let mut buffer = text;
+    let edit = egui::TextEdit::multiline(&mut buffer)
         .font(egui::TextStyle::Monospace)
-        .interactive(false)
-        .desired_width(ui.available_width());
-    if !wrap {
-        edit = edit.clip_text(true);
-    }
+        .desired_width(if wrap {
+            ui.available_width()
+        } else {
+            f32::INFINITY
+        });
     ui.add(edit);
 }
 
@@ -301,12 +307,7 @@ fn pretty_json(ui: &mut Ui, value: &serde_json::Value) {
     let font = egui::TextStyle::Monospace.resolve(ui.style());
     let mut job = egui::text::LayoutJob::default();
     emit_json(value, &mut job, &t, &font, 0);
-    egui::ScrollArea::both()
-        .id_salt("pretty_json_scroll")
-        .auto_shrink(false)
-        .show(ui, |ui| {
-            ui.add(egui::Label::new(job).selectable(true));
-        });
+    ui.add(egui::Label::new(job).selectable(true));
 }
 
 fn emit_json(
@@ -334,7 +335,7 @@ fn emit_json(
                     egui::TextFormat::simple(font.clone(), t.muted),
                 );
                 job.append(
-                    &format!("\"{key}\""),
+                    &serde_json::to_string(key).unwrap_or_default(),
                     0.0,
                     egui::TextFormat::simple(font.clone(), t.info),
                 );
@@ -373,7 +374,7 @@ fn emit_json(
             muted(job, "]");
         }
         serde_json::Value::String(text) => job.append(
-            &format!("\"{text}\""),
+            &serde_json::to_string(text).unwrap_or_default(),
             0.0,
             egui::TextFormat::simple(font.clone(), t.success),
         ),

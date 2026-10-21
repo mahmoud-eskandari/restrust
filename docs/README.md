@@ -1,6 +1,6 @@
 # restrust documentation
 
-restrust is a cross-platform (Windows, macOS, Linux, and the browser) Rust API client for designing, organizing, executing, testing, and sharing APIs. It operates fully independently on your machine — no account and no server required — and offers an optional self-hosted server for synchronization, team collaboration, and public publishing.
+restrust is a cross-platform (Windows, macOS, Linux, and the browser) Rust API client for designing, organizing, executing, testing, and sharing APIs. The desktop app operates fully independently on your machine — no account and no server required — and offers an optional self-hosted server for synchronization, team collaboration, and public publishing.
 
 ## Documentation index
 
@@ -15,7 +15,7 @@ restrust is a cross-platform (Windows, macOS, Linux, and the browser) Rust API c
 
 ## Where to start
 
-- If you want to send an API request within minutes, read [Getting started](getting-started.md). The client needs no account, no sign-in, and no server.
+- If you want to send an API request within minutes, read [Getting started](getting-started.md). Desktop execution needs no account or server; browser execution uses a signed-in restrust server.
 - If you are deploying the optional server for a team, read [Configuration](configuration.md) and [Sync and sharing](sync-and-sharing.md).
 - If you are migrating from another tool, read [Import, export, and snippets](interchange.md).
 

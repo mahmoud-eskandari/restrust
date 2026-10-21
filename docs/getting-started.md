@@ -1,6 +1,6 @@
 # Getting started
 
-restrust runs as a desktop application on Windows, macOS, and Linux, and as a browser application built with WebAssembly. This page takes you from a fresh checkout to a sent API request on the desktop or in the browser, and through a minimal server setup for when you want synchronization and sharing. None of the client workflows require an account: local use is the default, and the server is optional.
+restrust runs as a desktop application on Windows, macOS, and Linux, and as a browser application built with WebAssembly. This page takes you from a fresh checkout to a sent API request on the desktop or in the browser, and through a minimal server setup for when you want synchronization and sharing. The desktop client sends requests without an account or server. The browser client can edit collections offline, but sending requests requires signing in to the server that hosts it.
 
 ## Prerequisites
 
@@ -33,11 +33,13 @@ cd client
 trunk serve
 ```
 
-Trunk serves the WebAssembly client on `http://localhost:8080` by default. If you also run the restrust server locally (default port 8080), serve the client on a different port, for example `trunk serve --port 8081`.
+The checked-in Trunk configuration serves the client at `http://localhost:8081` and proxies `/api/` to the restrust server at `http://127.0.0.1:8080`. Start the server below, then sign in from the web client. This keeps browser requests on the same origin.
 
-The browser client persists your workspace in the browser's local storage, keyed per origin. Note that the browser sandbox applies normal CORS rules to the requests you send, so an API that works from the desktop client may need CORS headers to work from a browser page.
+The browser client persists your workspace in local storage, keyed per origin. Send calls the authenticated `/api/v1/execute` endpoint; the server makes the target HTTP request and returns its status, headers, body, and timing. Target APIs do not need CORS headers. Requests have a 30-second deadline and a 10 MiB body limit in each direction. Targets such as `localhost` refer to the server machine.
 
-## Quickstart: the server (optional)
+For deployment, build with `cd client && trunk build --release`, then run the server with `RESTRUST_WEB_DIR` pointing to the absolute path of `client/dist`. Serve the UI and API together.
+
+## Quickstart: the server
 
 The server adds accounts, synchronization, sharing, and public publishing. To try it locally:
 
@@ -55,11 +57,11 @@ curl http://localhost:8080/api/v1/healthz
 
 The two `RESTRUST_BOOTSTRAP_ADMIN_*` variables create the first administrator account if the server has none yet; the step is idempotent, and the credentials are only used when no admin exists. See [Configuration](configuration.md) for the full list of environment variables (ports, TLS, storage paths, sign-in providers) and their precedence.
 
-To connect the client to the server, open the client's account menu, choose **Sign in**, enter the server URL and your username and password, and sign in. After signing in, personal collections can be synchronized on demand, and collections shared with you or owned by your organizations appear under their namespaces. Everything continues to work without a server.
+To connect the client to the server, open the client's account menu, choose **Sign in**, enter the server URL and your username and password, and sign in. After signing in, personal collections can be synchronized on demand, and collections shared with you or owned by your organizations appear under their namespaces. Desktop request execution and local editing continue to work without a server.
 
 ## First steps in the client
 
-No account is needed for any of the following:
+These steps need no account on desktop. In the browser, sign in before sending:
 
 1. **Create a collection.** In the sidebar, use the new-collection action, give it a name, and it appears in your Personal namespace.
 2. **Add a request.** Open the collection's context menu and choose **New Request** (a folder is available for grouping).

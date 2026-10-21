@@ -64,6 +64,17 @@ pub fn mark_edited(stored: &mut StoredCollection) {
     }
 }
 
+/// Acknowledge the snapshot actually sent, retaining edits made while it was in flight.
+pub fn acknowledge_push(stored: &mut StoredCollection, sent: &Collection, revision: u64) {
+    stored.sync = if stored.collection == *sent {
+        SyncState::Synced { revision }
+    } else {
+        SyncState::PendingEdits {
+            base_revision: revision,
+        }
+    };
+}
+
 /// Applies a sync outcome to the stored collection's state.
 ///
 /// - `Pushed`/`Pulled` → `Synced`
@@ -147,11 +158,11 @@ pub fn plan_pull(local: &[StoredCollection], server: &[ServerEntry]) -> PullPlan
             continue;
         };
         match stored.sync {
-            SyncState::Revoked => plan.to_verify.push(stored.collection.id.clone()),
+            SyncState::Revoked => plan.to_verify.push(origin.collection_id.clone()),
             SyncState::PendingEdits { .. } => plan.to_push.push(stored.collection.id.clone()),
             SyncState::Synced { revision } => {
                 if entry.revision != revision {
-                    plan.to_pull.push(stored.collection.id.clone());
+                    plan.to_pull.push(origin.collection_id.clone());
                 }
             }
             SyncState::Local => {} // has an origin but Local: treat as needing a pull
@@ -236,6 +247,35 @@ pub fn personal_namespace(user_id: &str, username: &str) -> NamespaceRef {
 mod tests {
     use super::*;
     use restrust_core::model::{Collection, HttpMethod, RequestDef};
+
+    #[test]
+    fn pull_plan_uses_server_ids_when_local_ids_differ() {
+        let local = vec![stored(
+            "local",
+            SyncState::Synced { revision: 1 },
+            Some(origin("remote", NamespaceKind::Personal)),
+        )];
+        let plan = plan_pull(
+            &local,
+            &[ServerEntry {
+                id: "remote".into(),
+                revision: 2,
+            }],
+        );
+        assert_eq!(plan.to_pull, vec!["remote"]);
+    }
+
+    #[test]
+    fn edits_made_during_a_push_remain_pending_on_the_new_revision() {
+        let mut local = stored("local", SyncState::PendingEdits { base_revision: 1 }, None);
+        let sent = local.collection.clone();
+        local.collection.name = "Edited while syncing".into();
+        acknowledge_push(&mut local, &sent, 2);
+        assert_eq!(local.sync, SyncState::PendingEdits { base_revision: 2 });
+        let sent = local.collection.clone();
+        acknowledge_push(&mut local, &sent, 3);
+        assert_eq!(local.sync, SyncState::Synced { revision: 3 });
+    }
 
     fn stored(id: &str, sync: SyncState, origin: Option<ServerOrigin>) -> StoredCollection {
         StoredCollection {
@@ -489,9 +529,9 @@ mod tests {
             }, // not local at all
         ];
         let plan = plan_pull(&local, &server);
-        assert_eq!(plan.to_pull, vec!["b".to_string(), "new".to_string()]);
+        assert_eq!(plan.to_pull, vec!["sb".to_string(), "new".to_string()]);
         assert_eq!(plan.to_push, vec!["c".to_string()]);
-        assert_eq!(plan.to_verify, vec!["d".to_string()]);
+        assert_eq!(plan.to_verify, vec!["sd".to_string()]);
         assert_eq!(plan.orphaned_pending, vec!["f".to_string()]);
     }
 

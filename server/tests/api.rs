@@ -151,6 +151,69 @@ fn error_code(body: &Value) -> &str {
     body["error"]["code"].as_str().unwrap_or("<missing>")
 }
 
+#[tokio::test]
+async fn browser_execution_relays_requests_without_target_cors() {
+    let state = state_with(base_config());
+    let user = add_user(&state, "sender", "pw", "user");
+    let token = state.with_db(|db| auth::create_session(db, &user)).unwrap();
+    let target = Router::new().route(
+        "/echo",
+        axum::routing::post(
+            |headers: axum::http::HeaderMap, body: axum::body::Bytes| async move {
+                assert_eq!(headers["authorization"], "Bearer target-secret");
+                assert!(headers.get("cookie").is_none());
+                (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    [("x-target", "echo")],
+                    body,
+                )
+            },
+        ),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let target_task = tokio::spawn(async move { axum::serve(listener, target).await.unwrap() });
+    let app = app_for(&state);
+    let request = json!({
+        "method": "POST", "url": format!("http://{address}/echo"),
+        "headers": [["Authorization", "Bearer target-secret"]],
+        "body": [0, 255, 65]
+    });
+    let (status, response, _) =
+        send(&app, "POST", "/api/v1/execute", Some(&token), Some(request)).await;
+    target_task.abort();
+    assert_eq!(status, StatusCode::OK, "{response}");
+    assert_eq!(response["status"], 422);
+    assert_eq!(response["body"], json!([0, 255, 65]));
+    assert!(response["headers"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(["x-target", "echo"])));
+}
+
+#[tokio::test]
+async fn execution_requires_a_session_and_rejects_invalid_targets() {
+    let state = state_with(base_config());
+    let app = app_for(&state);
+    let request = json!({"method":"GET", "url":"file:///etc/passwd", "headers":[], "body":[]});
+    let (status, _, _) = send(&app, "POST", "/api/v1/execute", None, Some(request.clone())).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let user = add_user(&state, "sender", "pw", "user");
+    let token = state.with_db(|db| auth::create_session(db, &user)).unwrap();
+    let (status, response, _) =
+        send(&app, "POST", "/api/v1/execute", Some(&token), Some(request)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{response}");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    drop(listener);
+    let request =
+        json!({"method":"GET", "url":format!("http://{address}"), "headers":[], "body":[]});
+    let (status, response, _) =
+        send(&app, "POST", "/api/v1/execute", Some(&token), Some(request)).await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY, "{response}");
+    assert_eq!(error_code(&response), "upstream_error");
+}
+
 // --- 1. bootstrap admin + login --------------------------------------------------
 
 #[tokio::test]

@@ -4,6 +4,7 @@
 pub mod admin;
 pub mod auth;
 pub mod collections;
+pub mod execute;
 pub mod public;
 
 use axum::extract::State;
@@ -34,6 +35,11 @@ async fn fallback_404() -> Response {
 /// fallback service.
 pub fn app_router(state: SharedState) -> Router {
     let v1 = Router::new()
+        .route(
+            "/execute",
+            axum::routing::post(execute::execute)
+                .layer(axum::extract::DefaultBodyLimit::max(42 * 1024 * 1024)),
+        )
         .route("/healthz", get(healthz))
         .route("/me", get(auth::session))
         .nest("/auth", auth::router())

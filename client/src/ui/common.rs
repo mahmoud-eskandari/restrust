@@ -163,6 +163,8 @@ pub fn kv_editor(
     on_edit: &mut impl FnMut(),
 ) {
     let t = current_tokens(ui);
+    let column_width =
+        ((ui.available_width() - 100.0) / if with_description { 3.0 } else { 2.0 }).max(50.0);
     egui::Grid::new(format!("kv_{id}"))
         .num_columns(5)
         .spacing([theme::GAP_INNER, 4.0])
@@ -188,19 +190,19 @@ pub fn kv_editor(
                 let key_resp = ui.add(
                     TextEdit::singleline(&mut key)
                         .font(egui::TextStyle::Monospace)
-                        .desired_width(f32::INFINITY)
+                        .desired_width(column_width)
                         .text_color(color),
                 );
                 let value_resp = ui.add(
                     TextEdit::singleline(&mut value)
                         .font(egui::TextStyle::Monospace)
-                        .desired_width(f32::INFINITY)
+                        .desired_width(column_width)
                         .text_color(color),
                 );
                 if with_description {
                     ui.add(
                         TextEdit::singleline(&mut description)
-                            .desired_width(f32::INFINITY)
+                            .desired_width(column_width)
                             .text_color(color),
                     );
                 } else {
@@ -310,8 +312,12 @@ pub fn row_sense(
     hover_fill: Color32,
     selected_fill: Color32,
 ) -> Response {
-    let rect = ui.available_rect_before_wrap();
-    let resp = ui.allocate_rect(rect, Sense::click());
+    let rect = egui::Rect::from_min_size(
+        ui.available_rect_before_wrap().min,
+        egui::vec2(ui.available_width(), theme::TREE_ROW_HEIGHT),
+    );
+    // The caller lays out the contents at this cursor; do not consume a second row.
+    let resp = ui.interact(rect, ui.next_auto_id().with("row_sense"), Sense::click());
     let fill = if selected {
         selected_fill
     } else if resp.hovered() {

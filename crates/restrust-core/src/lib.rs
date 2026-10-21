@@ -9,6 +9,7 @@
 //! - [`workspace_doc`]: the persisted workspace document and its store errors
 //! - [`history`]: history types and the retention limit
 
+pub mod execution;
 pub mod history;
 pub mod model;
 pub mod share;

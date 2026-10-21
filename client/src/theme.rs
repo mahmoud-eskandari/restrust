@@ -112,7 +112,7 @@ pub fn apply_theme(ctx: &Context, theme_name: &str) {
     visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, t.muted);
     visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, t.text);
     visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, t.text);
-    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, t.accent_hover);
+    visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, t.text);
     visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, t.accent);
     ctx.set_visuals(visuals);
 }

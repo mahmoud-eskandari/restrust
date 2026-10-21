@@ -2,112 +2,113 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'codex/**']
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ci-${{ github.ref }}-${{ github.event_name }}
   cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
-  fmt:
-    name: Format
-    runs-on: ubuntu-latest
+  quality:
+    name: Format, lint, and workflow validation
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: quality
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: actionlint@1.7.12
+      - name: Validate workflows
+        run: actionlint
       - name: Check formatting
         run: cargo fmt --all --check
-
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
       - name: Lint
-        run: cargo clippy --workspace --all-targets -- -D warnings
+        run: python scripts/ci/run.py cargo clippy --locked --workspace --all-targets -- -D warnings
+      - name: Test release tooling
+        run: python -m unittest discover -s scripts/ci -p 'test_*.py' -v
 
-  test:
-    name: Test (${{ matrix.os }})
+  native:
+    name: Test and release (${{ matrix.target }})
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: ${{ matrix.target }}
+      - name: Install target
+        run: rustup target add '${{ matrix.target }}'
+      - name: Test workspace
+        run: python scripts/ci/run.py cargo test --locked --workspace --target '${{ matrix.target }}'
+      - name: Build desktop and server release binaries
+        run: python scripts/ci/run.py cargo build --locked --release --workspace --bins --target '${{ matrix.target }}'
+      - name: Package and smoke-test release
+        run: python scripts/ci/package_release.py --target '${{ matrix.target }}'
+      - name: Upload release archive and checksum
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
 
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Run tests
-        run: cargo test --workspace
-
-  wasm:
-    name: WASM client build
-    runs-on: ubuntu-latest
+  web:
+    name: Browser release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Add wasm32 target
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: ./.github/actions/setup-rust
+        with:
+          cache-key: wasm32-unknown-unknown
+      - name: Install WASM target
         run: rustup target add wasm32-unknown-unknown
-
-      - name: Check client for wasm32
-        run: cargo check -p restrust-client --target wasm32-unknown-unknown
-
-      - name: Install trunk
-        uses: taiki-e/install-action@v2
+      - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
-          tool: trunk
-
-      - name: Build browser client
+          tool: trunk@0.22.0
+      - name: Check WASM client
+        run: python scripts/ci/run.py cargo check --locked -p restrust-client --target wasm32-unknown-unknown
+      - name: Build browser release
         working-directory: client
-        run: trunk build --release
-
-      - name: Upload browser client dist
-        uses: actions/upload-artifact@v4
+        run: python ../scripts/ci/run.py trunk build --release --locked
+      - name: Package browser release
+        run: python scripts/ci/package_release.py --web
+      - name: Upload browser archive and checksum
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: restrust-client-web
-          path: client/dist
+          name: release-web
+          path: dist/*
           if-no-files-found: error
-
-  server-release:
-    name: Server release build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-
-      - name: Build server (release)
-        run: cargo build --release -p restrust-server
-
-      - name: Upload server binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: restrust-server-linux
-          path: target/release/restrust-server
-          if-no-files-found: error
+          compression-level: 0

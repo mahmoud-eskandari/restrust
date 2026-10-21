@@ -1,3 +1,9 @@
 [build]
 # The binary target (src/main.rs) is built for wasm32; see index.html for the
 # <link data-trunk rel="rust"> bootstrap and the `the_canvas_id` canvas.
+
+[serve]
+port = 8081
+
+[[proxy]]
+backend = "http://127.0.0.1:8080/api/"

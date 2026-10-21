@@ -1,0 +1,30 @@
+name: Rust build environment
+description: Install native prerequisites, Rust components, Python, and a scoped cargo cache.
+inputs:
+  cache-key:
+    description: Build target or quality-check cache scope
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Install Linux build dependencies
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install --no-install-recommends -y \
+          build-essential cmake pkg-config libssl-dev libx11-dev libxi-dev \
+          libgl1-mesa-dev libxcursor-dev libxrandr-dev libxinerama-dev \
+          libxkbcommon-dev libwayland-dev
+    - name: Install Rust components
+      shell: bash
+      run: |
+        rustup toolchain install stable --profile minimal --component rustfmt --component clippy
+        rustup show
+    - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      with:
+        python-version: '3.13'
+    - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      with:
+        key: ${{ inputs.cache-key }}
+        save-if: ${{ github.event_name != 'pull_request' }}

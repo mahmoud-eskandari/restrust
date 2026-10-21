@@ -84,6 +84,9 @@ pub struct StoredCollection {
 #[serde(rename_all = "camelCase")]
 pub struct ClientSettings {
     pub server_url: Option<String>,
+    /// Remembered endpoints only; session credentials stay in memory.
+    #[serde(default)]
+    pub servers: Vec<String>,
     pub active_environment: Option<String>,
     pub theme: String,
 }
@@ -92,6 +95,7 @@ impl Default for ClientSettings {
     fn default() -> Self {
         ClientSettings {
             server_url: None,
+            servers: Vec::new(),
             active_environment: None,
             theme: "light".to_string(),
         }
@@ -273,6 +277,7 @@ mod tests {
             }],
             settings: ClientSettings {
                 server_url: Some("https://sync.example.test".to_string()),
+                servers: Vec::new(),
                 active_environment: Some("Dev".to_string()),
                 theme: "dark".to_string(),
             },
@@ -292,6 +297,7 @@ mod tests {
             doc.settings,
             ClientSettings {
                 server_url: None,
+                servers: Vec::new(),
                 active_environment: None,
                 theme: "light".to_string()
             }

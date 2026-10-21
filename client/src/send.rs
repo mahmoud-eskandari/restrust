@@ -5,6 +5,25 @@ use restrust_core::model::{AuthKind, BodyKind, HttpMethod, KeyValue, RequestDef,
 use restrust_core::vars::interpolate;
 use restrust_core::workspace_doc::WorkspaceDoc;
 
+/// Web clients must use the authenticated relay; there is no direct-fetch fallback.
+pub fn route_request(
+    request: ehttp::Request,
+    web: bool,
+    server: &str,
+    token: Option<&str>,
+) -> Result<ehttp::Request, String> {
+    if !web {
+        return Ok(request);
+    }
+    let token = token
+        .filter(|token| !token.is_empty())
+        .ok_or("Sign in to send requests through this server")?;
+    if server.is_empty() {
+        return Err("No execution server is selected".into());
+    }
+    Ok(crate::api::execute(server, token, request))
+}
+
 /// ehttp method for a domain method.
 fn ehttp_method(method: HttpMethod) -> ehttp::Method {
     match method {
@@ -81,6 +100,9 @@ pub fn base64_encode(data: &[u8]) -> String {
 
 /// Appends enabled, interpolated query rows to a URL.
 fn apply_query_rows(url: &str, rows: &[KeyValue], scopes: &[&[KeyValue]]) -> String {
+    let (base, fragment) = url
+        .split_once('#')
+        .map_or((url, None), |(base, fragment)| (base, Some(fragment)));
     let pairs: Vec<String> = rows
         .iter()
         .filter(|row| row.enabled && !row.key.trim().is_empty())
@@ -92,13 +114,20 @@ fn apply_query_rows(url: &str, rows: &[KeyValue], scopes: &[&[KeyValue]]) -> Str
             )
         })
         .collect();
-    if pairs.is_empty() {
-        url.to_string()
-    } else if url.contains('?') {
-        format!("{url}&{}", pairs.join("&"))
+    let mut result = if pairs.is_empty() {
+        base.to_string()
+    } else if base.ends_with('?') || base.ends_with('&') {
+        format!("{base}{}", pairs.join("&"))
+    } else if base.contains('?') {
+        format!("{base}&{}", pairs.join("&"))
     } else {
-        format!("{url}?{}", pairs.join("&"))
+        format!("{base}?{}", pairs.join("&"))
+    };
+    if let Some(fragment) = fragment {
+        result.push('#');
+        result.push_str(fragment);
     }
+    result
 }
 
 /// Serializes a multipart body, returning the boundary used alongside it.
@@ -109,7 +138,10 @@ fn multipart_body(rows: &[KeyValue], scopes: &[&[KeyValue]]) -> (String, Vec<u8>
         .iter()
         .filter(|r| r.enabled && !r.key.trim().is_empty())
     {
-        let key = interpolate(&row.key, scopes);
+        let key = interpolate(&row.key, scopes)
+            .replace('\r', "%0D")
+            .replace('\n', "%0A")
+            .replace('"', "%22");
         let value = interpolate(&row.value, scopes);
         body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
         body.extend_from_slice(
@@ -130,12 +162,17 @@ pub fn build_request(
     auth: &AuthKind,
     scopes: &[&[KeyValue]],
 ) -> Result<ehttp::Request, String> {
-    let mut url = interpolate(&def.url, scopes);
+    let mut url = interpolate(&def.url, scopes).trim().to_string();
     if url.trim().is_empty() {
         return Err("the URL is empty".to_string());
     }
     if !url.contains("://") {
         url = format!("https://{url}");
+    }
+    let parsed =
+        url::Url::parse(&url).map_err(|_| "Enter a valid HTTP or HTTPS URL".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err("Only HTTP and HTTPS URLs are supported".into());
     }
 
     let mut headers: Vec<(String, String)> = Vec::new();
@@ -187,14 +224,12 @@ pub fn build_request(
         }
     }
 
-    let mut url = apply_query_rows(&url, &def.query, scopes);
-    for (key, value) in query_extra {
-        let sep = if url.contains('?') { '&' } else { '?' };
-        url.push(sep);
-        url.push_str(&encode_query_component(&key));
-        url.push('=');
-        url.push_str(&encode_query_component(&value));
-    }
+    let url = apply_query_rows(&url, &def.query, scopes);
+    let auth_query: Vec<KeyValue> = query_extra
+        .into_iter()
+        .map(|(key, value)| KeyValue::new(key, value))
+        .collect();
+    let url = apply_query_rows(&url, &auth_query, &[]);
 
     let mut body: Vec<u8> = Vec::new();
     match &def.body.kind {
@@ -238,6 +273,7 @@ pub fn build_request(
         BodyKind::Multipart => {
             let (boundary, bytes) = multipart_body(&def.body.rows, scopes);
             body = bytes;
+            headers.retain(|(key, _)| !key.eq_ignore_ascii_case("content-type"));
             headers.push((
                 "Content-Type".into(),
                 format!("multipart/form-data; boundary={boundary}"),
@@ -272,11 +308,7 @@ pub fn build_request(
 pub fn summary_from_response(resp: &ehttp::Response, duration_ms: u64) -> ResponseSummary {
     ResponseSummary {
         status: resp.status,
-        reason: if resp.status_text.is_empty() {
-            "OK".to_string()
-        } else {
-            resp.status_text.clone()
-        },
+        reason: resp.status_text.clone(),
         size: resp.bytes.len() as u64,
         duration_ms,
         time: restrust_core::model::now_rfc3339(),
@@ -289,10 +321,64 @@ mod tests {
     use restrust_core::model::{Environment, KeyValue, RequestBody};
     use restrust_core::workspace_doc::ClientSettings;
 
+    #[test]
+    fn web_send_targets_relay_and_keeps_target_credentials_in_payload() {
+        let mut target = ehttp::Request::get("https://target.test/private");
+        target
+            .headers
+            .insert("Authorization", "Bearer target-token");
+        let req =
+            route_request(target, true, "https://restrust.test", Some("session-token")).unwrap();
+        assert_eq!(req.url, "https://restrust.test/api/v1/execute");
+        assert_eq!(
+            req.headers.get("authorization"),
+            Some("Bearer session-token")
+        );
+        let payload: restrust_core::execution::ExecuteRequest =
+            serde_json::from_slice(&req.body).unwrap();
+        assert_eq!(payload.url, "https://target.test/private");
+        assert!(payload
+            .headers
+            .contains(&("Authorization".into(), "Bearer target-token".into())));
+        assert!(route_request(
+            ehttp::Request::get("https://target.test"),
+            true,
+            "https://restrust.test",
+            None
+        )
+        .is_err());
+        assert_eq!(
+            route_request(ehttp::Request::get("https://target.test"), false, "", None)
+                .unwrap()
+                .url,
+            "https://target.test"
+        );
+    }
+
+    #[test]
+    fn query_and_auth_parameters_precede_url_fragment() {
+        let mut def = RequestDef::new(
+            HttpMethod::Get,
+            "test",
+            " https://api.test/path?old=1#section ",
+        );
+        def.query.push(KeyValue::new("q", "a b"));
+        let auth = AuthKind::ApiKey {
+            key: "key".into(),
+            value: "secret".into(),
+            add_to: restrust_core::model::ApiKeyIn::Query,
+        };
+        assert_eq!(
+            build_request(&def, &auth, &[]).unwrap().url,
+            "https://api.test/path?old=1&q=a%20b&key=secret#section"
+        );
+    }
+
     fn doc_with_env() -> WorkspaceDoc {
         let mut doc = WorkspaceDoc::new();
         doc.settings = ClientSettings {
             server_url: None,
+            servers: Vec::new(),
             active_environment: Some("Staging".into()),
             theme: "dark".into(),
         };
