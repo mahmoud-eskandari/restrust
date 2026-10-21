@@ -15,12 +15,9 @@ jobs:
   version:
     name: Validate release tag
     runs-on: ubuntu-24.04
-    outputs:
-      prerelease: ${{ steps.version.outputs.prerelease }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate stable or prerelease version
-        id: version
         run: python3 scripts/ci/release_version.py
 
   build:
@@ -29,7 +26,7 @@ jobs:
     uses: ./.github/workflows/ci.yml
 
   publish:
-    name: Create draft release
+    name: Upload release assets
     needs: [version, build]
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -42,22 +39,8 @@ jobs:
           pattern: release-*
           merge-multiple: true
           path: dist
-      - name: Verify archive checksums
-        working-directory: dist
-        run: |
-          cat ./*.sha256 > SHA256SUMS
-          sha256sum --check SHA256SUMS
-      - name: Upload verified assets to a draft
+      - name: Verify checksums and upload release assets
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-          PRERELEASE: ${{ needs.version.outputs.prerelease }}
-        run: |
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            test "$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft)" = true
-            gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/*.zip dist/SHA256SUMS --clobber
-            gh release edit "$RELEASE_TAG" --prerelease="$PRERELEASE"
-          else
-            gh release create "$RELEASE_TAG" --verify-tag --draft --title "$RELEASE_TAG" \
-              --prerelease="$PRERELEASE" --generate-notes dist/*.tar.gz dist/*.zip dist/SHA256SUMS
-          fi
+        run: python3 scripts/ci/publish_release.py
