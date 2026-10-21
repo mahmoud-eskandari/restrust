@@ -406,7 +406,10 @@ fn collection_row(
             if rename_here {
                 rename_edit(app, ui, &collection_id, None);
             } else {
-                ui.label(RichText::new(&stored.collection.name).color(name_color));
+                ui.add(
+                    egui::Label::new(RichText::new(&stored.collection.name).color(name_color))
+                        .selectable(false),
+                );
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
@@ -478,11 +481,14 @@ fn item_row(
                     if rename_here {
                         rename_edit(app, ui, collection_id, Some(&node_id));
                     } else {
-                        ui.label(RichText::new(&def.name).color(if revoked {
-                            t.revoked_gray
-                        } else {
-                            t.text
-                        }));
+                        ui.add(
+                            egui::Label::new(RichText::new(&def.name).color(if revoked {
+                                t.revoked_gray
+                            } else {
+                                t.text
+                            }))
+                            .selectable(false),
+                        );
                     }
                 }
                 CollectionItem::Folder(folder) => {
@@ -509,11 +515,14 @@ fn item_row(
                     if rename_here {
                         rename_edit(app, ui, collection_id, Some(&node_id));
                     } else {
-                        ui.label(RichText::new(&folder.name).color(if revoked {
-                            t.revoked_gray
-                        } else {
-                            t.text
-                        }));
+                        ui.add(
+                            egui::Label::new(RichText::new(&folder.name).color(if revoked {
+                                t.revoked_gray
+                            } else {
+                                t.text
+                            }))
+                            .selectable(false),
+                        );
                     }
                 }
             }
