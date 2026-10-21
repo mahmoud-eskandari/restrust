@@ -604,9 +604,9 @@ fn collection_context_menu(
     let collection_id = stored.collection.id.clone();
     let revoked = stored.sync == SyncState::Revoked;
     let open = matches!(&app.state.context_menu_node, Some((cid, None)) if *cid == collection_id);
-    let mut popup = egui::Popup::menu(resp);
+    let mut popup = egui::Popup::context_menu(resp);
     if open {
-        popup = popup.open(true);
+        popup = popup.open_memory(egui::SetOpenCommand::Bool(true));
     }
     popup.show(|ui| {
         app.state.context_menu_node = None;
@@ -747,9 +747,9 @@ fn item_context_menu(
         .unwrap_or(false);
     let read_tooltip = "Read only — you can send and export, but not edit";
     let open = matches!(&app.state.context_menu_node, Some((cid, Some(node))) if *cid == collection_id && *node == node_id);
-    let mut popup = egui::Popup::menu(resp);
+    let mut popup = egui::Popup::context_menu(resp);
     if open {
-        popup = popup.open(true);
+        popup = popup.open_memory(egui::SetOpenCommand::Bool(true));
     }
     popup.show(|ui| {
         app.state.context_menu_node = None;
