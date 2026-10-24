@@ -90,9 +90,9 @@ class ReleaseVersionTests(unittest.TestCase):
             (web / "index.html").write_text("<html></html>")
             (web / "client.js").write_text("// fixture")
             (web / "client.wasm").write_bytes(b"\0asm\x01\0\0\0")
-            archive_path = package(root, web=True)
-            self.assertEqual(archive_path.name, "restrust-0.1.0-beta-web.zip")
-            with zipfile.ZipFile(archive_path) as archive:
+            outputs = package(root, web=True)
+            self.assertEqual([path.name for path in outputs], ["restrust-0.1.0-beta-web.zip"])
+            with zipfile.ZipFile(outputs[0]) as archive:
                 self.assertIn("restrust-0.1.0-beta-web/web/index.html", archive.namelist())
 
     def test_rejected_tag_does_not_modify_manifest(self):

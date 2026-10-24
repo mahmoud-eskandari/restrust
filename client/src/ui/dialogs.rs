@@ -52,6 +52,7 @@ pub fn draw(app: &mut RestrustApp, ctx: &egui::Context) {
             collection_id,
             parent_folder,
         } => save_scratch_into(app, ctx, tab_id, collection_id, parent_folder),
+        DialogState::CollectionHistory(dialog) => collection_history(app, ctx, *dialog),
     }
 }
 
@@ -124,6 +125,19 @@ fn default_export_path(name: &str) -> String {
         let _ = name;
         String::new()
     }
+}
+
+/// Expands a leading `~` to the user's home directory (native paths).
+fn expand_home(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return std::path::PathBuf::from(home)
+                .join(rest)
+                .display()
+                .to_string();
+        }
+    }
+    path.to_string()
 }
 
 // --- generic modal helpers -----------------------------------------------------------
@@ -443,7 +457,7 @@ fn share(app: &mut RestrustApp, ctx: &egui::Context, mut dialog: crate::state::S
                             );
                         }
                     });
-                } else if ui.button("Publish").clicked() {
+                } else if busy_button(ui, "Publish", "Publishing…", dialog.publishing).clicked() {
                     dialog.publishing = true;
                     let slug = {
                         let s = dialog.slug.trim().to_string();
@@ -519,12 +533,87 @@ fn share(app: &mut RestrustApp, ctx: &egui::Context, mut dialog: crate::state::S
 
 fn import(app: &mut RestrustApp, ctx: &egui::Context, mut dialog: crate::state::ImportDialog) {
     let t = current_tokens_ctx(ctx);
+    // Accept dropped files while the dialog is open (§3.3). Native reads
+    // synchronously; the browser only exposes dropped files asynchronously,
+    // so the text lands in the context's temp store and is drained below.
+    let dropped_texts_id = egui::Id::unique("import_dropped_texts");
+    let dropped: Vec<egui::DroppedFileHandle> = ctx.input(|i| i.raw.dropped_files.clone());
+    for file in dropped {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(bytes) = egui::DroppedFile::bytes(file.as_ref()) {
+            let text = String::from_utf8_lossy(&bytes).to_string();
+            if !text.trim().is_empty() {
+                ctx.data_mut(|d| {
+                    let mut pending: Vec<String> = d.get_temp(dropped_texts_id).unwrap_or_default();
+                    pending.push(text);
+                    d.insert_temp(dropped_texts_id, pending);
+                });
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let file = file.clone();
+            let ctx = ctx.clone();
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Ok(bytes) = file.bytes_async().await {
+                    let text = String::from_utf8_lossy(&bytes).to_string();
+                    if !text.trim().is_empty() {
+                        ctx.data_mut(|d| {
+                            let mut pending: Vec<String> =
+                                d.get_temp(dropped_texts_id).unwrap_or_default();
+                            pending.push(text);
+                            d.insert_temp(dropped_texts_id, pending);
+                        });
+                        ctx.request_repaint();
+                    }
+                }
+            });
+        }
+    }
+    let pending: Vec<String> = ctx.data_mut(|d| d.get_temp(dropped_texts_id).unwrap_or_default());
+    ctx.data_mut(|d| d.insert_temp(dropped_texts_id, Vec::<String>::new()));
+    for text in pending {
+        if dialog.text.trim().is_empty() {
+            dialog.text = text;
+        } else {
+            dialog.text.push_str("\n\n");
+            dialog.text.push_str(&text);
+        }
+        dialog.error = None;
+    }
     let response = Modal::new(egui::Id::unique("import_dialog"))
         .area(egui::Area::new(egui::Id::unique("import_dialog")).fixed_pos(centered(ctx, 640.0)))
         .frame(dialog_frame(&t))
         .show(ctx, |ui| {
             ui.set_width(640.0);
             heading(ui, "Import");
+            ui.add_space(theme::GAP_STACK);
+
+            // Drop zone (lights up while a file hovers over the window).
+            let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
+            egui::Frame::NONE
+                .stroke(egui::Stroke::new(
+                    if hovering { 2.0 } else { 1.0 },
+                    if hovering { t.accent } else { t.border },
+                ))
+                .corner_radius(6.0)
+                .inner_margin(egui::Margin::same(10))
+                .show(ui, |ui| {
+                    ui.vertical_centered(|ui| {
+                        if hovering {
+                            ui.label(
+                                RichText::new("⬇ Drop to import")
+                                    .strong()
+                                    .color(t.accent),
+                            );
+                        } else {
+                            muted(
+                                ui,
+                                "Drag & drop a Postman / OpenAPI / cURL file here",
+                            );
+                        }
+                    });
+                });
             ui.add_space(theme::GAP_STACK);
             if let Some(done) = &mut dialog.done {
                 // Post-import report view.
@@ -717,14 +806,14 @@ fn export(app: &mut RestrustApp, ctx: &egui::Context, mut dialog: crate::state::
                     app.state.push_toast("Copied".to_string());
                 }
                 if !IS_WASM && ui.button("Write file").clicked() {
-                    match std::fs::write(&dialog.path, &dialog.output) {
+                    let path = expand_home(&dialog.path);
+                    match std::fs::write(&path, &dialog.output) {
                         Ok(()) => {
-                            app.state.push_toast("Saved".to_string());
+                            app.state.push_toast(format!("Saved {path}"));
                         }
                         Err(err) => {
                             dialog.error = Some(format!(
-                                "Could not write {}: {err}. Choose another location and try again.",
-                                dialog.path
+                                "Could not write {path}: {err}. Choose another location and try again."
                             ));
                         }
                     }
@@ -733,7 +822,7 @@ fn export(app: &mut RestrustApp, ctx: &egui::Context, mut dialog: crate::state::
             if !IS_WASM {
                 ui.horizontal(|ui| {
                     ui.label("File path");
-                    mono_field(ui, &mut dialog.path, "choose a path");
+                    mono_field(ui, &mut dialog.path, "choose a path (~ for home)");
                 });
             }
             if let Some(error) = &dialog.error {
@@ -752,6 +841,205 @@ fn export(app: &mut RestrustApp, ctx: &egui::Context, mut dialog: crate::state::
     }
     if matches!(app.state.dialog, DialogState::Export(_)) {
         if let DialogState::Export(current) = &mut app.state.dialog {
+            **current = dialog;
+        }
+    }
+}
+
+/// Opens the collection history (git-style revisions) dialog.
+pub fn open_collection_history(app: &mut RestrustApp, collection_id: &str) {
+    let Some(stored) = app.state.find_stored(collection_id) else {
+        return;
+    };
+    let name = stored.collection.name.clone();
+    let server_id = stored
+        .origin
+        .as_ref()
+        .map(|o| o.collection_id.clone())
+        .filter(|_| app.state.belongs_to_active_server(stored));
+    let mut dialog = crate::state::CollectionHistoryDialog {
+        collection_id: collection_id.to_string(),
+        name,
+        server_id,
+        loading: false,
+        error: None,
+        expanded: None,
+    };
+    // Synced collections start with a background refresh so the log shows
+    // every collaborator's changes, not just this device's.
+    if dialog.server_id.is_some() && app.state.login.signed_in() {
+        dialog.loading = true;
+        app.fetch_collection_revisions(collection_id);
+    }
+    app.state.dialog = DialogState::CollectionHistory(Box::new(dialog));
+}
+
+/// Git-style change history of one collection: newest first, each entry
+/// expandable to its scoped change records.
+fn collection_history(
+    app: &mut RestrustApp,
+    ctx: &egui::Context,
+    mut dialog: crate::state::CollectionHistoryDialog,
+) {
+    let t = current_tokens_ctx(ctx);
+    let entries = app.state.doc.revisions_of(&dialog.collection_id).to_vec();
+    let response = Modal::new(egui::Id::unique("collection_history_dialog"))
+        .area(
+            egui::Area::new(egui::Id::unique("collection_history_dialog"))
+                .fixed_pos(centered(ctx, 620.0)),
+        )
+        .frame(dialog_frame(&t))
+        .show(ctx, |ui| {
+            ui.set_width(620.0);
+            heading(ui, &format!("History — “{}”", dialog.name));
+            ui.add_space(theme::GAP_STACK);
+            if let Some(error) = &dialog.error {
+                error_block(ui, error);
+                ui.add_space(theme::GAP_TIGHT);
+            }
+            if entries.is_empty() && !dialog.loading {
+                muted(
+                    ui,
+                    "No revisions recorded yet. Save (Ctrl+S) or sync to create one.",
+                );
+            }
+            egui::ScrollArea::vertical()
+                .id_salt("collection_history_scroll")
+                .max_height(420.0)
+                .auto_shrink(false)
+                .show(ui, |ui| {
+                    for (index, entry) in entries.iter().enumerate().rev() {
+                        let is_open = dialog.expanded == Some(index);
+                        egui::Frame::NONE
+                            .fill(if is_open {
+                                crate::ui::common::linear_alpha(t.accent, 0.06)
+                            } else {
+                                t.panel_raised
+                            })
+                            .stroke(egui::Stroke::new(1.0, t.border))
+                            .corner_radius(4.0)
+                            .inner_margin(egui::Margin::symmetric(8, 6))
+                            .show(ui, |ui| {
+                                ui.horizontal_centered(|ui| {
+                                    let marker = if entry.revision == 0 { "●" } else { "r" };
+                                    let revision_label = if entry.revision == 0 {
+                                        "local".to_string()
+                                    } else {
+                                        format!("r{}", entry.revision)
+                                    };
+                                    ui.label(RichText::new(marker).size(11.0).color(
+                                        if entry.revision == 0 {
+                                            t.warning
+                                        } else {
+                                            t.success
+                                        },
+                                    ));
+                                    ui.label(RichText::new(revision_label).strong().size(12.0));
+                                    ui.label(RichText::new(&entry.summary).size(12.0));
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            muted(
+                                                ui,
+                                                &format!(
+                                                    "{} · {} · {}",
+                                                    entry.author,
+                                                    crate::state::relative_time(&entry.time),
+                                                    entry
+                                                        .time
+                                                        .get(..16)
+                                                        .unwrap_or(&entry.time)
+                                                        .replace('T', " "),
+                                                ),
+                                            );
+                                            let toggle = if is_open { "▾" } else { "▸" };
+                                            if ui
+                                                .add(
+                                                    egui::Button::new(toggle)
+                                                        .frame(false)
+                                                        .min_size(egui::vec2(20.0, 20.0)),
+                                                )
+                                                .clicked()
+                                            {
+                                                dialog.expanded =
+                                                    if is_open { None } else { Some(index) };
+                                            }
+                                        },
+                                    );
+                                });
+                                if is_open {
+                                    ui.add_space(theme::GAP_TIGHT);
+                                    if entry.changes.is_empty() {
+                                        muted(ui, "No scoped changes recorded.");
+                                    }
+                                    for change in &entry.changes {
+                                        let color = match change.kind {
+                                            restrust_core::revision::ChangeKind::Added => t.success,
+                                            restrust_core::revision::ChangeKind::Removed => {
+                                                t.danger
+                                            }
+                                            restrust_core::revision::ChangeKind::Modified => {
+                                                t.warning
+                                            }
+                                            restrust_core::revision::ChangeKind::Renamed => t.info,
+                                        };
+                                        ui.horizontal(|ui| {
+                                            ui.label(
+                                                RichText::new(change.kind.marker())
+                                                    .strong()
+                                                    .size(11.0)
+                                                    .color(color),
+                                            );
+                                            ui.label(
+                                                RichText::new(change.target.describe()).size(12.0),
+                                            );
+                                            if !change.fields.is_empty() {
+                                                muted(
+                                                    ui,
+                                                    &format!("— {}", change.fields.join(", ")),
+                                                );
+                                            }
+                                        });
+                                    }
+                                }
+                            });
+                        ui.add_space(theme::GAP_TIGHT);
+                    }
+                });
+            if dialog.loading {
+                ui.add_space(theme::GAP_TIGHT);
+                ui.horizontal(|ui| {
+                    ui.add(egui::Spinner::new().size(14.0));
+                    muted(ui, "Loading history from the server…");
+                });
+            }
+            ui.add_space(theme::GAP_STACK);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Done").clicked() {
+                    app.state.dialog = DialogState::None;
+                }
+                if let Some(server_id) = dialog.server_id.clone() {
+                    if ui
+                        .add_enabled(
+                            !dialog.loading && app.state.login.signed_in(),
+                            egui::Button::new("Refresh from server"),
+                        )
+                        .clicked()
+                    {
+                        dialog.loading = true;
+                        dialog.error = None;
+                        app.fetch_collection_revisions(&dialog.collection_id);
+                        let _ = server_id;
+                    }
+                }
+            });
+        });
+    if response.should_close() {
+        app.state.dialog = DialogState::None;
+        return;
+    }
+    if matches!(app.state.dialog, DialogState::CollectionHistory(_)) {
+        if let DialogState::CollectionHistory(current) = &mut app.state.dialog {
             **current = dialog;
         }
     }
@@ -907,9 +1195,10 @@ fn about(app: &mut RestrustApp, ctx: &egui::Context) {
             ui.set_width(360.0);
             ui.vertical_centered(|ui| {
                 ui.add_space(theme::GAP_TIGHT);
-                ui.label(RichText::new("▲").size(28.0));
-                ui.label(RichText::new("restrust").size(16.0).strong());
-                ui.add_space(theme::GAP_TIGHT);
+                let logo: egui::ImageSource =
+                    egui::include_image!("../../assets/logo-with-name.png");
+                ui.add(egui::Image::new(logo).max_width(200.0));
+                ui.add_space(theme::GAP_STACK);
                 muted(
                     ui,
                     &format!(

@@ -87,6 +87,12 @@ pub enum InflightOp {
         server_id: String,
         slug: String,
     },
+    /// Git-style history refresh for a collection (GET /revisions).
+    CollectionRevisions {
+        server: String,
+        server_id: String,
+        local_id: String,
+    },
     Admin(AdminOp),
 }
 
@@ -104,11 +110,16 @@ pub struct RestrustApp {
     pub last_saved_hhmm: Option<String>,
     /// Most recent `GET /collections` response (namespace metadata).
     last_list_entries: Vec<api::CollectionListEntry>,
+    /// Content of every collection at its last recorded history revision
+    /// (in-memory diff baseline for git-style history; recomputed on boot).
+    revision_baseline: HashMap<String, Collection>,
 }
 
 impl RestrustApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         theme::install_fonts(&cc.egui_ctx);
+        // PNG loader so `include_image!` assets (the app logo) render.
+        egui_extras::install_image_loaders(&cc.egui_ctx);
         let services = Arc::new(Services::new(&cc.egui_ctx));
 
         // Load the workspace; a corrupt store is backed up and we start fresh.
@@ -147,8 +158,7 @@ impl RestrustApp {
             );
         }
 
-        // `mut` is only needed on wasm, where the OIDC pickup below mutates it.
-        #[cfg_attr(not(target_arch = "wasm32"), expect(unused_mut))]
+        // The baseline fill below mutates `app` on every platform.
         let mut app = RestrustApp {
             state: app_state,
             services,
@@ -160,7 +170,20 @@ impl RestrustApp {
             applied_theme: None,
             last_saved_hhmm: None,
             last_list_entries: Vec::new(),
+            revision_baseline: HashMap::new(),
         };
+        // History baseline: current content, so the first explicit save after
+        // boot only records what changed from here on.
+        for stored in app
+            .state
+            .doc
+            .personal
+            .iter()
+            .chain(app.state.doc.organizations.iter())
+        {
+            app.revision_baseline
+                .insert(stored.collection.id.clone(), stored.collection.clone());
+        }
 
         // wasm: pick up a `#token=` left by the same-origin OIDC redirect.
         #[cfg(target_arch = "wasm32")]
@@ -273,8 +296,85 @@ impl RestrustApp {
                 };
                 return;
             }
+            // An explicit save of a saved request is a history checkpoint.
+            self.record_changed_revisions();
         }
         self.save_now();
+    }
+
+    /// Menu "Save Workspace": record history revisions, then persist.
+    pub fn save_and_record(&mut self) {
+        self.record_changed_revisions();
+        self.save_now();
+    }
+
+    // === collection revisions (git-style history) ==================================
+
+    /// Records a history revision for every collection whose content changed
+    /// since its last recorded revision (diffed against the in-memory
+    /// baseline). Local checkpoints carry revision `0` and are rewritten to
+    /// the server revision when pushed.
+    fn record_changed_revisions(&mut self) {
+        let author = self
+            .state
+            .login
+            .user
+            .as_ref()
+            .map(|u| u.username.clone())
+            .unwrap_or_else(|| "local".to_string());
+        let snapshot: Vec<(String, Collection)> = self
+            .state
+            .doc
+            .personal
+            .iter()
+            .chain(self.state.doc.organizations.iter())
+            .map(|s| (s.collection.id.clone(), s.collection.clone()))
+            .collect();
+        for (id, new_collection) in snapshot {
+            let new_hash = restrust_core::revision::content_hash(&new_collection);
+            match self.revision_baseline.get(&id) {
+                None => {
+                    self.revision_baseline.insert(id, new_collection);
+                }
+                Some(old) if restrust_core::revision::content_hash(old) != new_hash => {
+                    let revision =
+                        restrust_core::revision::revision_for(0, &author, old, &new_collection);
+                    self.state.doc.push_revision(&id, revision);
+                    self.revision_baseline.insert(id, new_collection);
+                }
+                Some(_) => {}
+            }
+        }
+    }
+
+    /// Fetches the authoritative server-side history (every collaborator's
+    /// pushes) for a synced collection and merges it into the local log.
+    pub fn fetch_collection_revisions(&mut self, local_id: &str) {
+        let (Some(token), base) = (
+            self.state.login.token.clone(),
+            self.server_base().unwrap_or_default(),
+        ) else {
+            return;
+        };
+        let Some(server_id) = self
+            .state
+            .find_stored(local_id)
+            .and_then(|s| s.origin.as_ref().map(|o| o.collection_id.clone()))
+        else {
+            return;
+        };
+        let id = self
+            .services
+            .http
+            .fetch_tracked(api::collection_revisions(&base, &token, &server_id));
+        self.inflight.insert(
+            id,
+            InflightOp::CollectionRevisions {
+                server: base,
+                server_id,
+                local_id: local_id.to_string(),
+            },
+        );
     }
 
     fn autosave_tick(&mut self) {
@@ -577,6 +677,14 @@ impl RestrustApp {
         ) else {
             return;
         };
+        if self.state.sync_in_flight {
+            self.state
+                .push_toast("A sync is already in progress".to_string());
+            return;
+        }
+        // The create + first PUT shows in the sync pill until it settles.
+        self.state.sync_in_flight = true;
+        self.state.login.status = ServerStatus::Syncing;
         let id = self.services.http.fetch_tracked(api::collection_create(
             &base,
             &token,
@@ -747,6 +855,7 @@ impl RestrustApp {
 
     pub fn remove_collection_local(&mut self, collection_id: &str) {
         sync::remove_local_data(&mut self.state.doc, collection_id);
+        self.revision_baseline.remove(collection_id);
         self.state.tabs.retain(|tab| {
             !matches!(&tab.kind, state::TabKind::Saved { collection_id: c, .. } if c == collection_id)
         });
@@ -937,7 +1046,16 @@ impl RestrustApp {
                 ic::openapi::export_3_0(collection).map_err(|e| format!("Export failed: {e}."))
             }
             state::ExportFormat::RestrustJson => {
-                serde_json::to_string_pretty(collection).map_err(|e| format!("Export failed: {e}."))
+                // The RestRust-native export: the collection plus its
+                // git-style revision history, re-importable by restrust.
+                let revisions = self.state.doc.revisions_of(&collection.id);
+                let value = serde_json::json!({
+                    "format": "restrust-collection",
+                    "formatVersion": 1,
+                    "collection": collection,
+                    "revisions": revisions,
+                });
+                serde_json::to_string_pretty(&value).map_err(|e| format!("Export failed: {e}."))
             }
         }
     }
@@ -1140,6 +1258,9 @@ impl RestrustApp {
                 let host = Self::host_of(&server);
                 match api::parse_ok(&result, |r| api::parse_revision(r.text().unwrap_or(""))) {
                     Ok(new_revision) => {
+                        // Local checkpoints in the history log become the
+                        // server revision they landed as.
+                        self.state.doc.mark_pending_pushed(&local_id, new_revision);
                         if let Some(server_id) = enable {
                             let user = self.state.login.user.clone().unwrap_or_default();
                             if let Some(stored) = self.state.stored_mut(&local_id) {
@@ -1234,6 +1355,14 @@ impl RestrustApp {
                             message,
                             vec![BannerAction::Dismiss],
                         );
+                        // The enable pass never reached its PUT; settle the
+                        // pill here (the Ok path settles via sync_step_done).
+                        self.state.sync_in_flight = false;
+                        self.state.login.status = if self.state.login.signed_in() {
+                            ServerStatus::Connected
+                        } else {
+                            ServerStatus::Offline
+                        };
                     }
                 }
             }
@@ -1337,6 +1466,31 @@ impl RestrustApp {
                     }
                 }
                 let _ = local_id;
+            }
+            InflightOp::CollectionRevisions { local_id, .. } => {
+                match api::parse_ok(&result, |r| {
+                    api::parse_collection_revisions(r.text().unwrap_or(""))
+                }) {
+                    Ok(entries) => {
+                        self.state.doc.merge_server_revisions(&local_id, entries);
+                        self.state.mark_edited();
+                        if let DialogState::CollectionHistory(dialog) = &mut self.state.dialog {
+                            if dialog.collection_id == local_id {
+                                dialog.loading = false;
+                                dialog.error = None;
+                            }
+                        }
+                    }
+                    Err(ApiError::Unauthorized) => self.handle_unauthorized(),
+                    Err(err) => {
+                        if let DialogState::CollectionHistory(dialog) = &mut self.state.dialog {
+                            if dialog.collection_id == local_id {
+                                dialog.loading = false;
+                                dialog.error = Some(err.server_message());
+                            }
+                        }
+                    }
+                }
             }
             InflightOp::Admin(op) => ui::admin::handle_admin_result(self, op, result),
         }
@@ -1475,19 +1629,50 @@ impl RestrustApp {
                 }),
                 access,
             };
+            self.revision_baseline
+                .insert(stored.collection.id.clone(), stored.collection.clone());
             match stored.origin.as_ref().map(|o| o.namespace.kind) {
                 Some(NamespaceKind::Organization) => self.state.doc.organizations.push(stored),
                 _ => self.state.doc.personal.push(stored),
             }
-        } else if let Some(stored) = self.state.stored_mut(local_id) {
-            get.collection.id = local_id.to_string();
-            stored.collection = get.collection;
-            stored.access = access;
-            if let Some(origin) = stored.origin.as_mut() {
-                origin.server_url = server.to_string();
-                origin.collection_id = server_id.to_string();
+        } else {
+            // History: the pull is a revision by the collection's owner.
+            // Computed under the borrow, recorded after it ends.
+            let mut pulled_entry: Option<restrust_core::revision::CollectionRevision> = None;
+            let mut new_content: Option<Collection> = None;
+            if let Some(stored) = self.state.stored_mut(local_id) {
+                let old = stored.collection.clone();
+                let changed = restrust_core::revision::content_hash(&old)
+                    != restrust_core::revision::content_hash(&get.collection);
+                get.collection.id = local_id.to_string();
+                stored.collection = get.collection;
+                stored.access = access;
+                if let Some(origin) = stored.origin.as_mut() {
+                    origin.server_url = server.to_string();
+                    origin.collection_id = server_id.to_string();
+                }
+                sync::apply_response(stored, &SyncOutcome::Pulled { revision });
+                if changed {
+                    let author = stored
+                        .origin
+                        .as_ref()
+                        .map(|o| o.namespace.name.clone())
+                        .unwrap_or_else(|| "server".to_string());
+                    pulled_entry = Some(restrust_core::revision::revision_for(
+                        revision,
+                        &author,
+                        &old,
+                        &stored.collection,
+                    ));
+                }
+                new_content = Some(stored.collection.clone());
             }
-            sync::apply_response(stored, &SyncOutcome::Pulled { revision });
+            if let Some(entry) = pulled_entry {
+                self.state.doc.push_revision(local_id, entry);
+            }
+            if let Some(content) = new_content {
+                self.revision_baseline.insert(local_id.to_string(), content);
+            }
         }
         self.sync_worked = true;
         if was_revoked {
@@ -1609,6 +1794,7 @@ mod tests {
             applied_theme: None,
             last_saved_hhmm: None,
             last_list_entries: Vec::new(),
+            revision_baseline: HashMap::new(),
         }
     }
 

@@ -4,14 +4,16 @@ The **CI** workflow runs on pull requests, pushes to `main` or `codex/**`, and m
 
 | Target | Hosted runner | Release archive |
 | --- | --- | --- |
-| Linux x64 | Ubuntu 24.04 | `restrust-VERSION-x86_64-unknown-linux-gnu.tar.gz` |
-| Linux ARM64 | Ubuntu 24.04 ARM | `restrust-VERSION-aarch64-unknown-linux-gnu.tar.gz` |
+| Linux x64 | Ubuntu 24.04 | `restrust-VERSION-x86_64-unknown-linux-gnu.tar.gz` + `restrust_VERSION_amd64.deb` |
+| Linux ARM64 | Ubuntu 24.04 ARM | `restrust-VERSION-aarch64-unknown-linux-gnu.tar.gz` + `restrust_VERSION_arm64.deb` |
 | macOS Intel | macOS 15 Intel | `restrust-VERSION-x86_64-apple-darwin.tar.gz` |
 | macOS Apple Silicon | macOS 15 ARM | `restrust-VERSION-aarch64-apple-darwin.tar.gz` |
 | Windows x64 | Windows Server 2025 | `restrust-VERSION-x86_64-pc-windows-msvc.zip` |
 | Browser | Ubuntu 24.04 / WASM | `restrust-VERSION-web.zip` |
 
-Native archives contain both `restrust-client` and `restrust-server` (`.exe` on Windows), documentation, and licenses. The packaging step starts the built server with an isolated temporary database and checks its version and HTTP health endpoint. The desktop executable is built and its shared logic is tested; CI does not interact with a desktop window. Executables are unsigned. Linux packages target Ubuntu 24.04-compatible systems and require the usual graphics libraries for the desktop app; they are not static musl binaries.
+Native archives contain both `restrust-client` and `restrust-server` (`.exe` on Windows), documentation, and licenses. The packaging step starts the built server with an isolated temporary database and checks its version and HTTP health endpoint. The desktop executable is built and its shared logic is tested; CI does not interact with a desktop window. Executables are unsigned. Linux packages target Ubuntu 24.04-compatible systems and require the usual graphics libraries for the desktop app; they are not static musl binaries. The Linux targets additionally produce Debian packages (`restrust_VERSION_amd64.deb`, `restrust_VERSION_arm64.deb`) that install both binaries, a `restrust` desktop entry, and hicolor icons.
+
+A **Docker image** is built and published to Docker Hub as `mahmoudetc/restrust` on every push to `main` (tags `latest`, `sha-…`) and every `v*` tag (tag `VERSION`, `latest`). The image contains the server plus the Trunk-built web client and serves both from one listener (`RESTRUST_WEB_DIR` is preconfigured); publishing requires the `DOCKERHUB_USERNAME` and `DOCKERHUB_TOKEN` repository secrets.
 
 The browser archive contains a `web/` directory built by Trunk. Set `RESTRUST_WEB_DIR` to its absolute path when starting the server. Browser sends require signing in to this server, as described in [Getting started](getting-started.md).
 
@@ -23,7 +25,7 @@ Open a completed CI run in GitHub Actions and download the appropriate `release-
 
 1. Update `workspace.package.version` in `Cargo.toml` and refresh `Cargo.lock` with Cargo.
 2. Commit the release version, then push a matching tag such as `v0.1.0`. A stable workspace version also accepts a prerelease suffix: with `0.1.0` in Cargo, tags such as `v0.1.0-beta`, `v0.1.0-beta.1`, and `v0.1.0-rc.1` are valid. A different base version, such as `v0.2.0-beta`, is rejected. If Cargo already contains a prerelease version, the tag must match it exactly.
-3. The **Release** workflow validates the tag and applies its complete version to the temporary CI checkouts. It refreshes workspace lockfile entries with `cargo update --workspace`, then runs the complete CI workflow with locked dependencies. Binaries and archives therefore carry the full version, including `-beta`. It downloads all six archives and verifies their checksums.
+3. The **Release** workflow validates the tag and applies its complete version to the temporary CI checkouts. It refreshes workspace lockfile entries with `cargo update --workspace`, then runs the complete CI workflow with locked dependencies. Binaries and archives therefore carry the full version, including `-beta`. It downloads all eight archives plus the two Debian packages and verifies their checksums.
 4. If no release exists, it creates a **draft** GitHub release with the archives and `SHA256SUMS`. Review the draft and publish it from GitHub when ready. If you already published a release or prerelease for the tag, the workflow adds the missing files to that existing release.
 
 Prerelease tags also set GitHub's **Pre-release** flag. Stable tags leave that flag off. Version preparation only changes the CI checkout; it does not commit or push changes to the repository.
@@ -40,7 +42,7 @@ If tests and builds passed but uploading failed, use the **Upload release assets
 2. Enter the existing tag, for example `v0.1.0-beta`.
 3. Enter the original **Release** run ID from its URL (`actions/runs/RUN_ID`).
 
-This workflow verifies that the run belongs to the same repository and tag commit and that every version, test, and build job succeeded. It downloads the existing six artifacts, checks every archive checksum, and uploads missing files. It does not rebuild binaries, recreate tags, or change a published release back to a draft. The source artifacts must still be available; GitHub normally retains them for 90 days unless repository settings specify otherwise. An immutable release cannot receive missing assets.
+This workflow verifies that the run belongs to the same repository and tag commit and that every version, test, and build job succeeded. It downloads the existing eight artifacts, checks every archive checksum, and uploads missing files. It does not rebuild binaries, recreate tags, or change a published release back to a draft. The source artifacts must still be available; GitHub normally retains them for 90 days unless repository settings specify otherwise. An immutable release cannot receive missing assets.
 
 ## Local checks
 

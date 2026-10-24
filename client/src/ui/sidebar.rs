@@ -222,11 +222,15 @@ fn search_box(app: &mut RestrustApp, ui: &mut Ui) {
 }
 
 fn collections_header(app: &mut RestrustApp, ui: &mut Ui) {
-    ui.horizontal(|ui| {
+    ui.horizontal_centered(|ui| {
+        ui.set_height(theme::HEADER_ROW_HEIGHT);
         ui.label(RichText::new("Collections").strong().size(12.0));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if ui
-                .add(egui::Button::new(RichText::new("⇩").size(13.0)).small())
+                .add(
+                    egui::Button::new(RichText::new("⇩").size(13.0))
+                        .min_size(egui::vec2(22.0, 22.0)),
+                )
                 .on_hover_text("Import…")
                 .clicked()
             {
@@ -234,7 +238,10 @@ fn collections_header(app: &mut RestrustApp, ui: &mut Ui) {
                     DialogState::Import(Box::new(crate::state::ImportDialog::new(None)));
             }
             if ui
-                .add(egui::Button::new(RichText::new("＋").size(14.0)).small())
+                .add(
+                    egui::Button::new(RichText::new("＋").size(13.0))
+                        .min_size(egui::vec2(22.0, 22.0)),
+                )
                 .on_hover_text("New collection")
                 .clicked()
             {
@@ -647,6 +654,9 @@ fn collection_context_menu(
         }
         if ui.button("Duplicate").clicked() {
             duplicate_collection(app, &collection_id);
+        }
+        if ui.button("History…").clicked() {
+            crate::ui::dialogs::open_collection_history(app, &collection_id);
         }
         ui.separator();
 

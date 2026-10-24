@@ -1,0 +1,15 @@
+# Keep the build context small and private: no build outputs, git history or
+# private product docs ever reach the image.
+.git
+.github
+target
+client/target
+client/dist
+server/target
+mydocs
+docs
+scripts
+dist
+**/*.deb
+**/*.tar.gz
+**/*.zip

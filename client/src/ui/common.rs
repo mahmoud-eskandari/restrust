@@ -93,8 +93,14 @@ pub fn muted(ui: &mut Ui, text: &str) {
 
 /// The primary (accent-filled) button, e.g. Send / Import / Save.
 pub fn primary_button(ui: &mut Ui, label: &str, min_width: f32) -> Response {
+    primary_button_enabled(ui, true, label, min_width)
+}
+
+/// [`primary_button`] that can be disabled (e.g. until a dialog form is valid).
+pub fn primary_button_enabled(ui: &mut Ui, enabled: bool, label: &str, min_width: f32) -> Response {
     let t = current_tokens(ui);
-    ui.add(
+    ui.add_enabled(
+        enabled,
         Button::new(RichText::new(label).color(t.on_accent).strong())
             .fill(t.accent)
             .stroke(Stroke::NONE)
@@ -300,8 +306,51 @@ pub fn icon_button(ui: &mut Ui, icon: &str, tooltip: &str) -> Response {
 
 /// Ghost toggle button that shows a selected background when active.
 pub fn ghost_toggle(ui: &mut Ui, icon: &str, active: bool, tooltip: &str) -> Response {
-    ui.add(Button::new(RichText::new(icon).size(14.0)).selected(active))
-        .on_hover_text(tooltip)
+    ui.add(
+        Button::new(RichText::new(icon).size(14.0))
+            .selected(active)
+            .min_size(Vec2::new(26.0, theme::HEIGHT_CONTROL)),
+    )
+    .on_hover_text(tooltip)
+}
+
+// --- menu items ---------------------------------------------------------------------
+
+/// Width for a menu item inside a popup whose content `Ui::set_min_width` is
+/// `menu_width` (the menu frame adds 6 px inner margin on each side).
+pub fn menu_item_width(menu_width: f32) -> f32 {
+    menu_width - 12.0
+}
+
+/// A stretchable menu item with an optional keyboard shortcut, right-aligned
+/// in weak text (`Button::shortcut_text`). Give every item of a menu the same
+/// `min_width` so labels and shortcuts line up (§1.3).
+pub fn menu_item(ui: &mut Ui, label: &str, shortcut: Option<&str>, min_width: f32) -> Response {
+    menu_item_enabled(ui, true, label, shortcut, "", min_width)
+}
+
+/// [`menu_item`] that can be disabled with a hover hint.
+pub fn menu_item_enabled(
+    ui: &mut Ui,
+    enabled: bool,
+    label: &str,
+    shortcut: Option<&str>,
+    disabled_hint: &str,
+    min_width: f32,
+) -> Response {
+    let mut button = Button::new(label);
+    if let Some(shortcut) = shortcut {
+        button = button.shortcut_text(shortcut);
+    }
+    let resp = ui.add_enabled(
+        enabled,
+        button.min_size(Vec2::new(min_width, theme::HEIGHT_MENU_ITEM)),
+    );
+    if !enabled && !disabled_hint.is_empty() {
+        resp.on_disabled_hover_text(disabled_hint)
+    } else {
+        resp
+    }
 }
 
 /// A full-row clickable area with hover/selected fills, for tree and history

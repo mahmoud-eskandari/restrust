@@ -376,6 +376,20 @@ pub struct NewEnvironmentDialog {
     pub values: Vec<KeyValue>,
 }
 
+/// Collection history dialog state (git-style revisions).
+#[derive(Clone, Debug)]
+pub struct CollectionHistoryDialog {
+    pub collection_id: String,
+    pub name: String,
+    /// Server collection id when synced — enables "refresh from server".
+    pub server_id: Option<String>,
+    pub loading: bool,
+    pub error: Option<String>,
+    /// Index (into the displayed newest-first list) of the entry whose change
+    /// scope is expanded.
+    pub expanded: Option<usize>,
+}
+
 /// All modal dialogs (ui-spec §3). At most one is open.
 #[derive(Clone, Debug, Default)]
 pub enum DialogState {
@@ -418,6 +432,8 @@ pub enum DialogState {
         collection_id: Option<String>,
         parent_folder: Option<String>,
     },
+    /// Git-style change history of a collection.
+    CollectionHistory(Box<CollectionHistoryDialog>),
 }
 
 impl DialogState {

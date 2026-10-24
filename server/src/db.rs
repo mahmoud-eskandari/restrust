@@ -99,10 +99,27 @@ pub fn migrate(conn: &Connection) -> rusqlite::Result<()> {
             published_at TEXT
         );
 
+        -- Git-style per-collection change history (RestRust-native). One row
+        -- per accepted revision; `data` keeps the full snapshot so any
+        -- revision can be replayed.
+        CREATE TABLE IF NOT EXISTS collection_revisions (
+            collection_id TEXT NOT NULL,
+            revision INTEGER NOT NULL,
+            author_user_id TEXT NULL,
+            author_username TEXT NOT NULL,
+            time TEXT NOT NULL,
+            summary TEXT NOT NULL,
+            content_hash INTEGER NOT NULL DEFAULT 0,
+            changes TEXT NOT NULL,
+            data TEXT NOT NULL,
+            PRIMARY KEY (collection_id, revision)
+        );
+
         CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
         CREATE INDEX IF NOT EXISTS idx_collections_owner ON collections(owner_user_id) WHERE deleted = 0;
         CREATE INDEX IF NOT EXISTS idx_collections_org ON collections(org_id) WHERE deleted = 0;
         CREATE INDEX IF NOT EXISTS idx_shares_subject ON shares(subject_kind, subject_id);
+        CREATE INDEX IF NOT EXISTS idx_revisions_collection ON collection_revisions(collection_id, revision);
         "#,
     )
 }

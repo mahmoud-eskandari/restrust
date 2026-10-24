@@ -17,6 +17,13 @@ ARCHIVES = (
     "x86_64-pc-windows-msvc.zip", "web.zip",
 )
 
+# Debian packages built for the Linux targets (see package_release.build_deb).
+DEB_ARCHITECTURES = ("amd64", "arm64")
+
+
+def deb_name(version, architecture):
+    return f"restrust_{version}_{architecture}.deb"
+
 
 def gh(*arguments):
     return subprocess.run(["gh", *map(str, arguments)], check=True, capture_output=True, text=True).stdout
@@ -35,7 +42,9 @@ def digest(path):
 
 def verified_assets(directory, tag):
     version = tag_version(tag)
-    files = sorted(directory / f"restrust-{version}-{suffix}" for suffix in ARCHIVES)
+    files = [directory / f"restrust-{version}-{suffix}" for suffix in ARCHIVES]
+    files += [directory / deb_name(version, architecture) for architecture in DEB_ARCHITECTURES]
+    files = sorted(files)
     checksums = []
     for path in files:
         if not path.is_file() or not path.stat().st_size:

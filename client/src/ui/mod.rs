@@ -351,15 +351,19 @@ fn tab_bar(app: &mut RestrustApp, ui: &mut Ui) {
                             }
                         });
                     });
+                if let Some(index) = close {
+                    app.state.close_tab(index);
+                }
+                ui.add_space(theme::GAP_TIGHT);
                 if ui
-                    .add(egui::Button::new(egui::RichText::new("＋").size(14.0)))
+                    .add_sized(
+                        [24.0, 24.0],
+                        egui::Button::new(egui::RichText::new("＋").size(14.0)),
+                    )
                     .on_hover_text("New request tab (Ctrl+T)")
                     .clicked()
                 {
                     app.state.new_tab();
-                }
-                if let Some(index) = close {
-                    app.state.close_tab(index);
                 }
             });
         });

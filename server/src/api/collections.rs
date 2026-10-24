@@ -13,6 +13,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use restrust_core::model::Collection;
+use restrust_core::revision::{self, ChangeRecord};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -174,6 +175,48 @@ fn list_visible(conn: &Connection, user_id: &str) -> rusqlite::Result<Vec<Collec
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     Ok(rows)
+}
+
+/// Inserts one row into the collection history log. `changes` are serialized
+/// once here; the summary is generated from them.
+fn record_revision(
+    conn: &Connection,
+    collection_id: &str,
+    revision: i64,
+    author: (&str, &str),
+    time: &str,
+    changes: Vec<ChangeRecord>,
+    data: &str,
+) {
+    let (author_user_id, author_username) = author;
+    let summary = if changes.is_empty() {
+        "Collection created".to_string()
+    } else {
+        revision::summarize(&changes)
+    };
+    let changes_json = serde_json::to_string(&changes).unwrap_or_else(|_| "[]".to_string());
+    let hash: i64 = serde_json::from_str::<Collection>(data)
+        .map(|c| revision::content_hash(&c) as i64)
+        .unwrap_or(0);
+    if let Err(err) = conn.execute(
+        "INSERT OR REPLACE INTO collection_revisions
+         (collection_id, revision, author_user_id, author_username, time, summary, content_hash, changes, data)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            collection_id,
+            revision,
+            if author_user_id.is_empty() { None } else { Some(author_user_id) },
+            author_username,
+            time,
+            summary,
+            hash,
+            changes_json,
+            data
+        ],
+    ) {
+        // History is best-effort: a failure must not fail the sync itself.
+        log::error!("could not record revision {revision} of {collection_id}: {err}");
+    }
 }
 
 fn namespace_json(conn: &Connection, row: &CollectionRow) -> rusqlite::Result<serde_json::Value> {
@@ -339,6 +382,16 @@ pub async fn create(
             ],
         )
         .map_err(ApiError::from)?;
+        // Revision 1 of the history log: the creation itself.
+        record_revision(
+            conn,
+            &id,
+            1,
+            (&user.id, &user.username),
+            &now,
+            Vec::new(),
+            &data,
+        );
         Ok((id, now))
     })?;
 
@@ -421,12 +474,30 @@ pub async fn update(
                 ApiError::bad_request(format!("collection serialization failed: {e}"))
             })?;
             let now = restrust_core::model::now_rfc3339();
-            conn.execute(
+            // History: diff the previous snapshot against the incoming one so
+            // every accepted PUT carries its change scope.
+            let old: Collection = serde_json::from_str(&row.data).unwrap_or_else(|_| {
+                // A corrupt previous snapshot diffs against an empty shell.
+                Collection::new(&body.collection.name)
+            });
+            let changes = revision::describe_changes(&old, &body.collection);
+            let tx = conn.unchecked_transaction().map_err(ApiError::from)?;
+            tx.execute(
             "UPDATE collections SET data = ?1, revision = revision + 1, updated_at = ?2, name = ?3
              WHERE id = ?4",
             params![data, now, body.collection.name, id],
         )
         .map_err(ApiError::from)?;
+            record_revision(
+                &tx,
+                &id,
+                row.revision + 1,
+                (&user.id, &user.username),
+                &now,
+                changes,
+                &data,
+            );
+            tx.commit().map_err(ApiError::from)?;
             Ok(json!({"revision": row.revision + 1}))
         })
         .map(Json)
@@ -707,6 +778,114 @@ fn uniquify_slug(conn: &Connection, base: &str, collection_id: &str) -> ApiResul
     Err(ApiError::internal("could not derive a unique slug"))
 }
 
+/// `GET /api/v1/collections/{id}/revisions` — the git-style change log,
+/// newest first (metadata + change scope, no snapshots). Any access level
+/// may read it.
+pub async fn list_revisions(
+    State(state): State<SharedState>,
+    AuthUser(user): AuthUser,
+    Path(id): Path<String>,
+) -> ApiResult<Json<serde_json::Value>> {
+    state
+        .with_db(|conn| -> ApiResult<serde_json::Value> {
+            let row = fetch_collection(conn, &id)
+                .map_err(ApiError::from)?
+                .ok_or_else(|| ApiError::not_found("collection not found"))?;
+            access_for(conn, &user.id, &row).ok_or_else(|| {
+                ApiError::access_denied("you do not have access to this collection")
+            })?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT revision, author_username, time, summary, content_hash, changes
+                     FROM collection_revisions WHERE collection_id = ?1
+                     ORDER BY revision DESC LIMIT 500",
+                )
+                .map_err(ApiError::from)?;
+            let entries = stmt
+                .query_map([&id], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, String>(3)?,
+                        r.get::<_, i64>(4)?,
+                        r.get::<_, String>(5)?,
+                    ))
+                })
+                .map_err(ApiError::from)?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(ApiError::from)?;
+            let revisions: Vec<Value> = entries
+                .iter()
+                .map(|(rev, author, time, summary, hash, changes)| {
+                    json!({
+                        "revision": rev,
+                        "author": author,
+                        "time": time,
+                        "summary": summary,
+                        "contentHash": hash,
+                        "changes": serde_json::from_str::<Value>(changes)
+                            .unwrap_or(Value::Array(Vec::new())),
+                    })
+                })
+                .collect();
+            Ok(json!({"revisions": revisions}))
+        })
+        .map(Json)
+}
+
+/// `GET /api/v1/collections/{id}/revisions/{revision}` — one history entry
+/// including the full collection snapshot at that revision.
+pub async fn get_revision(
+    State(state): State<SharedState>,
+    AuthUser(user): AuthUser,
+    Path((id, revision)): Path<(String, String)>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let revision: i64 = revision
+        .parse()
+        .map_err(|_| ApiError::bad_request("`revision` must be an integer"))?;
+    state
+        .with_db(|conn| -> ApiResult<serde_json::Value> {
+            let row = fetch_collection(conn, &id)
+                .map_err(ApiError::from)?
+                .ok_or_else(|| ApiError::not_found("collection not found"))?;
+            access_for(conn, &user.id, &row).ok_or_else(|| {
+                ApiError::access_denied("you do not have access to this collection")
+            })?;
+            let entry = conn
+                .query_row(
+                    "SELECT author_username, time, summary, changes, data
+                     FROM collection_revisions WHERE collection_id = ?1 AND revision = ?2",
+                    params![id, revision],
+                    |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, String>(2)?,
+                            r.get::<_, String>(3)?,
+                            r.get::<_, String>(4)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(ApiError::from)?
+                .ok_or_else(|| ApiError::not_found("revision not found"))?;
+            let (author, time, summary, changes, data) = entry;
+            let collection: Collection = serde_json::from_str(&data)
+                .map_err(|e| ApiError::internal(format!("stored revision is corrupt: {e}")))?;
+            Ok(json!({
+                "revision": revision,
+                "author": author,
+                "time": time,
+                "summary": summary,
+                "changes": serde_json::from_str::<Value>(&changes)
+                    .unwrap_or(Value::Array(Vec::new())),
+                "collection": collection,
+            }))
+        })
+        .map(Json)
+}
+
 pub fn router() -> Router<SharedState> {
     Router::new()
         .route("/collections", get(list).post(create))
@@ -716,4 +895,6 @@ pub fn router() -> Router<SharedState> {
         )
         .route("/collections/{id}/shares", put(put_shares))
         .route("/collections/{id}/publish", post(publish).delete(unpublish))
+        .route("/collections/{id}/revisions", get(list_revisions))
+        .route("/collections/{id}/revisions/{revision}", get(get_revision))
 }

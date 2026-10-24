@@ -176,6 +176,84 @@ pub fn status_class_color(status: u16, t: &ThemeTokens) -> Color32 {
     }
 }
 
+// --- server identity colors ------------------------------------------------------------------
+
+/// Number of reserved server identity colors. Every server connection is
+/// assigned one of these so its UI marks (dots, pills, rows) are recognizable
+/// at a glance; up to [`SERVER_COLOR_COUNT`] concurrent servers are unique.
+pub const SERVER_COLOR_COUNT: usize = 30;
+
+/// The reserved palette. Chosen to stay legible on both the dark and light
+/// palettes and distinct from the method chips.
+pub const SERVER_COLORS: [Color32; SERVER_COLOR_COUNT] = [
+    Color32::from_rgb(0x58, 0xA6, 0xFF), // sky
+    Color32::from_rgb(0x3F, 0xB9, 0x50), // green
+    Color32::from_rgb(0xD2, 0x99, 0x22), // amber
+    Color32::from_rgb(0xA3, 0x71, 0xF7), // violet
+    Color32::from_rgb(0xF8, 0x51, 0x49), // red
+    Color32::from_rgb(0x2D, 0xD4, 0xBF), // teal
+    Color32::from_rgb(0xE3, 0xB3, 0x41), // gold
+    Color32::from_rgb(0xDB, 0x61, 0xA2), // pink
+    Color32::from_rgb(0x54, 0xAE, 0xFF), // cornflower
+    Color32::from_rgb(0x8D, 0xB6, 0x00), // lime
+    Color32::from_rgb(0xFF, 0x94, 0x57), // tangerine
+    Color32::from_rgb(0x47, 0x9A, 0xE0), // cobalt
+    Color32::from_rgb(0xC1, 0x3A, 0xC5), // magenta
+    Color32::from_rgb(0x00, 0xB8, 0xDB), // cyan
+    Color32::from_rgb(0xB0, 0x8F, 0x5C), // bronze
+    Color32::from_rgb(0x7E, 0xE7, 0x87), // mint
+    Color32::from_rgb(0xFF, 0x7B, 0xB6), // rose
+    Color32::from_rgb(0x6E, 0xC9, 0xFF), // aqua
+    Color32::from_rgb(0xF2, 0xB8, 0x66), // butterscotch
+    Color32::from_rgb(0x9E, 0x6B, 0x53), // sienna
+    Color32::from_rgb(0x76, 0xE3, 0xEA), // glacier
+    Color32::from_rgb(0xBD, 0x56, 0x1D), // rust
+    Color32::from_rgb(0x9C, 0x6F, 0xF5), // periwinkle
+    Color32::from_rgb(0x5A, 0xB0, 0xA6), // seafoam
+    Color32::from_rgb(0xDA, 0xAA, 0x3F), // honey
+    Color32::from_rgb(0xE2, 0x76, 0x08), // carrot
+    Color32::from_rgb(0x82, 0x9C, 0xF7), // lavender
+    Color32::from_rgb(0x4D, 0xB8, 0x57), // jade
+    Color32::from_rgb(0xD4, 0x6A, 0xD4), // orchid
+    Color32::from_rgb(0x91, 0x9D, 0xAA), // steel
+];
+
+/// FNV-1a over the URL bytes — stable across restarts without storing
+/// anything.
+fn server_hash(url: &str) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in url.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
+    }
+    hash
+}
+
+/// Stable index into [`SERVER_COLORS`] for a server URL. Probes forward on
+/// collision with the other *known* servers so up to [`SERVER_COLOR_COUNT`]
+/// connections are unique; beyond that two servers may share a color.
+pub fn server_color_index(url: &str, known_servers: &[String]) -> usize {
+    let taken: Vec<u64> = known_servers
+        .iter()
+        .filter(|s| s.as_str() != url)
+        .map(|s| server_hash(s) % SERVER_COLOR_COUNT as u64)
+        .collect();
+    let base = server_hash(url) % SERVER_COLOR_COUNT as u64;
+    for probe in 0..SERVER_COLOR_COUNT as u64 {
+        let candidate = (base + probe) % SERVER_COLOR_COUNT as u64;
+        if !taken.contains(&candidate) {
+            return candidate as usize;
+        }
+    }
+    base as usize
+}
+
+/// The identity color of a server connection (`known_servers` should be every
+/// known endpoint, e.g. `settings.servers` plus the active one).
+pub fn server_color(url: &str, known_servers: &[String]) -> Color32 {
+    SERVER_COLORS[server_color_index(url, known_servers)]
+}
+
 // --- spacing / sizing helpers (§4.4) -----------------------------------------
 
 /// Tight gap between an icon and its label.
@@ -191,6 +269,8 @@ pub const GAP_SECTION: f32 = 16.0;
 pub const HEIGHT_SMALL: f32 = 22.0;
 /// Standard control height (buttons, text fields, combos).
 pub const HEIGHT_CONTROL: f32 = 28.0;
+/// Height of items inside dropdown menus.
+pub const HEIGHT_MENU_ITEM: f32 = 26.0;
 /// Primary/large (Send) control height.
 pub const HEIGHT_PRIMARY: f32 = 32.0;
 

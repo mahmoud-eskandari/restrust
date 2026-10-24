@@ -346,6 +346,55 @@ pub fn collection_delete(base: &str, token: &str, id: &str) -> ehttp::Request {
     delete_request(join_url(base, API_ROOT) + "/collections/" + id, Some(token))
 }
 
+/// `GET /collections/{id}/revisions` — the git-style change log.
+pub fn collection_revisions(base: &str, token: &str, id: &str) -> ehttp::Request {
+    get_request(
+        join_url(base, API_ROOT) + "/collections/" + id + "/revisions",
+        Some(token),
+    )
+}
+
+/// One row of `GET /collections/{id}/revisions` (server shape; the change
+/// records reuse the core wire format).
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServerRevisionDto {
+    pub revision: u64,
+    #[serde(default)]
+    pub author: String,
+    #[serde(default)]
+    pub time: String,
+    #[serde(default)]
+    pub summary: String,
+    #[serde(default)]
+    pub content_hash: u64,
+    #[serde(default)]
+    pub changes: Vec<restrust_core::revision::ChangeRecord>,
+}
+
+/// `GET /collections/{id}/revisions` response.
+pub fn parse_collection_revisions(
+    body: &str,
+) -> Result<Vec<restrust_core::revision::CollectionRevision>, ApiError> {
+    #[derive(Deserialize)]
+    struct RevisionsResponse {
+        #[serde(default)]
+        revisions: Vec<ServerRevisionDto>,
+    }
+    let response = deser::<RevisionsResponse>(body)?;
+    Ok(response
+        .revisions
+        .into_iter()
+        .map(|dto| restrust_core::revision::CollectionRevision {
+            revision: dto.revision,
+            content_hash: dto.content_hash,
+            time: dto.time,
+            author: dto.author,
+            summary: dto.summary,
+            changes: dto.changes,
+        })
+        .collect())
+}
+
 /// Converts a core grant to the server wire shape (§4.4):
 /// `{subject:{kind, id?, name?}, level:"read"|"full"}`.
 fn grant_to_wire(grant: &ShareGrant) -> serde_json::Value {

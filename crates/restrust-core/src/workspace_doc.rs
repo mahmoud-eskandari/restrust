@@ -5,8 +5,10 @@
 
 use crate::history::HISTORY_LIMIT;
 use crate::model::{Collection, Environment, HistoryEntry, KeyValue, RequestDef, ResponseSummary};
+use crate::revision::{CollectionRevision, REVISIONS_LIMIT};
 use crate::share::AccessLevel;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 /// Errors raised when reading or writing a [`WorkspaceDoc`].
 #[derive(Debug, thiserror::Error)]
@@ -123,6 +125,12 @@ pub struct WorkspaceDoc {
     pub environments: Vec<Environment>,
     pub history: Vec<HistoryEntry>,
     pub settings: ClientSettings,
+    /// Git-style change log per local collection id (RestRust-native history,
+    /// §"collection revisions"). Entries are newest-last, capped at
+    /// [`REVISIONS_LIMIT`] per collection. Keyed by *local* collection id;
+    /// server-fetched entries replace/merge by revision number.
+    #[serde(default)]
+    pub collection_revisions: BTreeMap<String, Vec<CollectionRevision>>,
 }
 
 impl Default for WorkspaceDoc {
@@ -145,6 +153,7 @@ impl WorkspaceDoc {
             environments: Vec::new(),
             history: Vec::new(),
             settings: ClientSettings::default(),
+            collection_revisions: BTreeMap::new(),
         }
     }
 
@@ -193,6 +202,72 @@ impl WorkspaceDoc {
             response,
         };
         self.push_history(entry);
+    }
+
+    // --- collection revisions (git-style history) --------------------------------
+
+    /// Appends a revision to a collection's log, keeping only the newest
+    /// [`REVISIONS_LIMIT`] entries.
+    pub fn push_revision(&mut self, collection_id: &str, revision: CollectionRevision) {
+        let log = self
+            .collection_revisions
+            .entry(collection_id.to_string())
+            .or_default();
+        log.push(revision);
+        let overflow = log.len().saturating_sub(REVISIONS_LIMIT);
+        if overflow > 0 {
+            log.drain(..overflow);
+        }
+    }
+
+    /// The stored log of a collection (may be empty).
+    pub fn revisions_of(&self, collection_id: &str) -> &[CollectionRevision] {
+        self.collection_revisions
+            .get(collection_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// The hash of the newest recorded revision for a collection, if any.
+    pub fn last_revision_hash(&self, collection_id: &str) -> Option<u64> {
+        self.revisions_of(collection_id)
+            .last()
+            .map(|r| r.content_hash)
+    }
+
+    /// Assigns `revision` to every pending local checkpoint (revision `0`) of
+    /// a collection — called after a successful push so the log stays a
+    /// linear story ("local edit" becomes the server revision it landed as).
+    pub fn mark_pending_pushed(&mut self, collection_id: &str, revision: u64) {
+        if let Some(log) = self.collection_revisions.get_mut(collection_id) {
+            for entry in log.iter_mut().filter(|entry| entry.revision == 0) {
+                entry.revision = revision;
+            }
+        }
+    }
+
+    /// Replaces all entries at revision >= 1 of a collection with the
+    /// server-fetched log (the authoritative per-push history), keeping local
+    /// checkpoints (revision `0`) that are newer than the oldest server
+    /// entry. Server entries may arrive unordered; they are sorted ascending.
+    pub fn merge_server_revisions(
+        &mut self,
+        collection_id: &str,
+        mut server_entries: Vec<CollectionRevision>,
+    ) {
+        server_entries.retain(|entry| entry.revision > 0);
+        server_entries.sort_by_key(|entry| entry.revision);
+        let local_pending: Vec<CollectionRevision> = self
+            .revisions_of(collection_id)
+            .iter()
+            .filter(|entry| entry.revision == 0)
+            .cloned()
+            .collect();
+        let mut merged = server_entries;
+        merged.extend(local_pending);
+        merged.sort_by_key(|entry| (entry.revision == 0, entry.time.clone()));
+        self.collection_revisions
+            .insert(collection_id.to_string(), merged);
     }
 }
 
@@ -281,6 +356,7 @@ mod tests {
                 active_environment: Some("Dev".to_string()),
                 theme: "dark".to_string(),
             },
+            collection_revisions: BTreeMap::new(),
         }
     }
 
@@ -428,5 +504,79 @@ mod tests {
             doc.add_history(request(&format!("cap{i}")), None);
         }
         assert_eq!(doc.history.len(), HISTORY_LIMIT);
+    }
+
+    fn revision_entry(revision: u64, time: &str) -> crate::revision::CollectionRevision {
+        crate::revision::CollectionRevision {
+            revision,
+            content_hash: revision,
+            time: time.to_string(),
+            author: "alice".to_string(),
+            summary: "s".to_string(),
+            changes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn push_revision_caps_and_keeps_order() {
+        let mut doc = WorkspaceDoc::new();
+        for i in 0..(REVISIONS_LIMIT + 5) {
+            doc.push_revision("c1", revision_entry(i as u64, &format!("t{i}")));
+        }
+        assert_eq!(doc.revisions_of("c1").len(), REVISIONS_LIMIT);
+        // Oldest dropped, newest kept.
+        assert_eq!(doc.revisions_of("c1")[0].revision, 5);
+        assert_eq!(
+            doc.revisions_of("c1").last().unwrap().revision,
+            REVISIONS_LIMIT as u64 + 4
+        );
+        assert!(doc.revisions_of("other").is_empty());
+    }
+
+    #[test]
+    fn pending_checkpoints_are_rewritten_on_push() {
+        let mut doc = WorkspaceDoc::new();
+        doc.push_revision("c1", revision_entry(0, "t1"));
+        doc.push_revision("c1", revision_entry(0, "t2"));
+        doc.push_revision("c1", revision_entry(3, "t0"));
+        doc.mark_pending_pushed("c1", 4);
+        let revisions: Vec<u64> = doc
+            .revisions_of("c1")
+            .iter()
+            .map(|entry| entry.revision)
+            .collect();
+        assert_eq!(revisions, [4, 4, 3]);
+    }
+
+    #[test]
+    fn server_revisions_replace_pushed_entries_and_keep_local_checkpoints() {
+        let mut doc = WorkspaceDoc::new();
+        doc.push_revision("c1", revision_entry(1, "t1"));
+        doc.push_revision("c1", revision_entry(0, "t2-local"));
+        doc.merge_server_revisions("c1", vec![revision_entry(2, "t2"), revision_entry(1, "t1")]);
+        let revisions: Vec<u64> = doc
+            .revisions_of("c1")
+            .iter()
+            .map(|entry| entry.revision)
+            .collect();
+        // Server 1 replaced local 1; server 2 appended; the pending local
+        // checkpoint (revision 0) sorts last.
+        assert_eq!(revisions, [1, 2, 0]);
+    }
+
+    #[test]
+    fn collection_revisions_roundtrip_and_legacy_docs_parse() {
+        let mut doc = WorkspaceDoc::new();
+        doc.push_revision("c1", revision_entry(1, "2026-10-24T10:00:00Z"));
+        let json = doc.to_json().unwrap();
+        assert!(json.contains("collectionRevisions"));
+        let back = WorkspaceDoc::from_json(&json).unwrap();
+        assert_eq!(back.revisions_of("c1")[0].revision, 1);
+
+        // A document written by an older build (no revisions field) parses
+        // with an empty log.
+        let legacy = r#"{"formatVersion":1,"personal":[],"organizations":[],"globals":[],"environments":[],"history":[],"settings":{"serverUrl":null,"servers":[],"activeEnvironment":null,"theme":"dark"}}"#;
+        let doc = WorkspaceDoc::from_json(legacy).unwrap();
+        assert!(doc.collection_revisions.is_empty());
     }
 }

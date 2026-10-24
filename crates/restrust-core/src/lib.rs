@@ -8,10 +8,12 @@
 //! - [`share`]: sharing grants and access levels
 //! - [`workspace_doc`]: the persisted workspace document and its store errors
 //! - [`history`]: history types and the retention limit
+//! - [`revision`]: git-style collection change history (diff, summary, log)
 
 pub mod execution;
 pub mod history;
 pub mod model;
+pub mod revision;
 pub mod share;
 pub mod vars;
 pub mod workspace_doc;

@@ -4,7 +4,7 @@ import subprocess
 import tempfile
 import unittest
 
-from publish_release import ARCHIVES, digest, publish_assets, verified_assets, verify_source_run
+from publish_release import ARCHIVES, DEB_ARCHITECTURES, deb_name, digest, publish_assets, verified_assets, verify_source_run
 
 REPOSITORY = "owner/restrust"
 TAG = "v0.1.0-beta"
@@ -44,9 +44,11 @@ class PublishReleaseTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
-        for suffix in ARCHIVES:
-            path = self.directory / f"restrust-0.1.0-beta-{suffix}"
-            path.write_bytes(f"archive for {suffix}".encode())
+        names = [f"restrust-0.1.0-beta-{suffix}" for suffix in ARCHIVES]
+        names += [deb_name("0.1.0-beta", architecture) for architecture in DEB_ARCHITECTURES]
+        for name in names:
+            path = self.directory / name
+            path.write_bytes(f"archive for {name}".encode())
             path.with_name(path.name + ".sha256").write_text(f"{digest(path)}  {path.name}\n")
 
     def test_existing_published_prerelease_receives_all_assets(self):
@@ -56,7 +58,7 @@ class PublishReleaseTests(unittest.TestCase):
         self.assertEqual(len(writes), 1)
         self.assertEqual(writes[0][:3], ["release", "upload", TAG])
         self.assertNotIn("--clobber", writes[0])
-        self.assertEqual(len(github.release["assets"]), 7)
+        self.assertEqual(len(github.release["assets"]), 9)
         self.assertEqual(github.release["draft"], False)
         self.assertEqual(github.release["prerelease"], True)
 
@@ -73,7 +75,7 @@ class PublishReleaseTests(unittest.TestCase):
         github = FakeGitHub({"draft": False, "assets": [{"name": existing.name, "digest": "sha256:" + digest(existing)}]})
         publish_assets(REPOSITORY, TAG, self.directory, github)
         self.assertNotIn(str(existing), github.writes()[0])
-        self.assertEqual(len(github.release["assets"]), 7)
+        self.assertEqual(len(github.release["assets"]), 9)
 
     def test_different_published_file_blocks_all_uploads(self):
         existing = verified_assets(self.directory, TAG)[-1]

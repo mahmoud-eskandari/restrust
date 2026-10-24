@@ -919,3 +919,140 @@ async fn session_expiry_rejected_on_session_route() {
     let (status, _, _) = send(&app, "GET", "/api/v1/me", Some(&token), None).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
+
+// --- collection revisions (git-style history) ------------------------------------------
+
+#[tokio::test]
+async fn collection_revisions_record_scope_and_snapshot() {
+    let state = state_with(base_config());
+    let app = app_for(&state);
+
+    add_user(&state, "hist", "hist-pass", "user");
+    let (token, _) = login(&app, "hist", "hist-pass").await;
+
+    // Create: revision 1 exists with the creation entry.
+    let (status, body, _) = send(
+        &app,
+        "POST",
+        "/api/v1/collections",
+        Some(&token),
+        Some(json!({"name": "History API"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let id = body["id"].as_str().unwrap().to_string();
+
+    let (status, body, _) = send(
+        &app,
+        "GET",
+        &format!("/api/v1/collections/{id}/revisions"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["revisions"].as_array().unwrap().len(), 1);
+    assert_eq!(body["revisions"][0]["revision"], 1);
+    assert_eq!(body["revisions"][0]["author"], "hist");
+    assert_eq!(body["revisions"][0]["summary"], "Collection created");
+
+    // PUT #1: add a request via a full collection payload → revision 2 with
+    // a scoped change record.
+    let payload = collection_payload(&id, "History API");
+    let (status, body, _) = send(
+        &app,
+        "PUT",
+        &format!("/api/v1/collections/{id}"),
+        Some(&token),
+        Some(json!({"base_revision": 1, "collection": payload})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["revision"], 2);
+
+    // PUT #2: rename the collection (same content, so the diff is a pure
+    // rename) → revision 3 records the rename.
+    let (status, body, _) = send(
+        &app,
+        "GET",
+        &format!("/api/v1/collections/{id}"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let mut renamed = body["collection"].clone();
+    renamed["name"] = json!("History API Renamed");
+    let (status, _, _) = send(
+        &app,
+        "PUT",
+        &format!("/api/v1/collections/{id}"),
+        Some(&token),
+        Some(json!({"base_revision": 2, "collection": renamed})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, body, _) = send(
+        &app,
+        "GET",
+        &format!("/api/v1/collections/{id}/revisions"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let revisions = body["revisions"].as_array().unwrap();
+    assert_eq!(revisions.len(), 3, "{body}");
+    // Newest first.
+    assert_eq!(revisions[0]["revision"], 3);
+    assert_eq!(revisions[0]["summary"], "renamed collection");
+    assert_eq!(revisions[1]["revision"], 2);
+    assert!(
+        revisions[1]["summary"].to_string().contains("request"),
+        "expected a request change in: {}",
+        revisions[1]["summary"]
+    );
+    let changes = revisions[1]["changes"].as_array().unwrap();
+    assert!(
+        changes
+            .iter()
+            .any(|c| c["kind"] == "added" && c["target"]["request"]["name"] == "list things"),
+        "expected an added-request record in {changes:?}"
+    );
+
+    // Single revision with snapshot.
+    let (status, body, _) = send(
+        &app,
+        "GET",
+        &format!("/api/v1/collections/{id}/revisions/1"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["collection"]["name"], "History API");
+    assert_eq!(body["revision"], 1);
+
+    // Missing revision → 404.
+    let (status, _, _) = send(
+        &app,
+        "GET",
+        &format!("/api/v1/collections/{id}/revisions/99"),
+        Some(&token),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // No session → 401 before anything else.
+    let (status, _, _) = send(
+        &app,
+        "GET",
+        &format!("/api/v1/collections/{id}/revisions"),
+        None,
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}

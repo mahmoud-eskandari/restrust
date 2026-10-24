@@ -17,6 +17,85 @@ import zipfile
 
 ROOT = Path(__file__).resolve().parents[2]
 
+DESKTOP_ENTRY = """[Desktop Entry]
+Type=Application
+Name=restrust
+GenericName=API Client
+Comment=Local-first API client for REST development
+Exec=restrust-client
+Icon=restrust
+Terminal=false
+Categories=Development;Network;
+Keywords=API;REST;HTTP;Postman;
+"""
+
+
+def deb_architecture(target):
+    """Debian architecture for a Rust target triple."""
+    return "arm64" if target.startswith("aarch64") else "amd64"
+
+
+def deb_version(version):
+    """Debian upstream versions may not contain '-'; '~' marks prereleases
+    and sorts before the final release (0.1.0~beta < 0.1.0)."""
+    return version.replace("-", "~")
+
+
+def build_deb(root, target, version, binary_dir):
+    """Package the Linux binaries into a .deb (desktop app + icons) and write
+    its SHA-256 sidecar. Returns the .deb path."""
+    name = f"restrust_{deb_version(version)}_{deb_architecture(target)}"
+    with tempfile.TemporaryDirectory(prefix="restrust-deb-") as directory:
+        staging = Path(directory) / name
+        (staging / "usr/bin").mkdir(parents=True)
+        (staging / "usr/share/applications").mkdir(parents=True)
+        docs = staging / "usr/share/doc/restrust"
+        docs.mkdir(parents=True)
+        for executable in ["restrust-client", "restrust-server"]:
+            binary = binary_dir / executable
+            assert binary.is_file() and binary.stat().st_size, f"Missing release binary: {binary}"
+            shutil.copy2(binary, staging / "usr/bin" / executable)
+        (staging / "usr/share/applications/restrust.desktop").write_text(DESKTOP_ENTRY, encoding="utf-8")
+        for size in ("512x512", "256x256"):
+            icons = staging / f"usr/share/icons/hicolor/{size}/apps"
+            icons.mkdir(parents=True)
+            shutil.copy2(root / "client/assets/logo.png", icons / "restrust.png")
+        copyright = docs / "copyright"
+        copyright.write_text(
+            "\n\n".join(
+                (root / filename).read_text(encoding="utf-8")
+                for filename in ["LICENSE-MIT", "LICENSE-APACHE"]
+            ),
+            encoding="utf-8",
+        )
+        (staging / "DEBIAN").mkdir()
+        (staging / "DEBIAN/control").write_text(
+            f"Package: restrust\n"
+            f"Version: {deb_version(version)}\n"
+            f"Section: devel\n"
+            f"Priority: optional\n"
+            f"Architecture: {deb_architecture(target)}\n"
+            f"Maintainer: Mahmoud Eskandari <mahmoudetc@users.noreply.github.com>\n"
+            f"Depends: libxkbcommon0, libxkbcommon-x11-0, libx11-6, libwayland-client0, "
+            f"libxcursor1, libxrandr2, libxi6\n"
+            f"Description: Local-first API client for REST development\n"
+            f" restrust desktop client and sync server, packaged for Debian-based\n"
+            f" systems. The desktop entry appears as “restrust” in the app menu.\n",
+            encoding="utf-8",
+        )
+        output = root / "dist" / (name + ".deb")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(
+            ["dpkg-deb", "--root-owner-group", "--build", str(staging), str(output)],
+            check=True,
+        )
+        # Sanity: the package must list its own contents cleanly.
+        subprocess.run(["dpkg-deb", "--contents", str(output)], check=True, capture_output=True)
+    with output.open("rb") as source:
+        digest_value = hashlib.file_digest(source, "sha256").hexdigest()
+    output.with_name(output.name + ".sha256").write_text(f"{digest_value}  {output.name}\n", encoding="utf-8")
+    return output
+
 
 def smoke_server(binary, version):
     result = subprocess.run([str(binary), "--version"], check=True, capture_output=True, text=True)
@@ -78,6 +157,7 @@ def package(root, target=None, web=False):
     name = f"restrust-{version}-{'web' if web else target}"
     windows = bool(target and "windows" in target)
     suffix = ".zip" if windows or web else ".tar.gz"
+    outputs = []
     with tempfile.TemporaryDirectory(prefix="restrust-package-") as directory:
         staging = Path(directory) / name
         staging.mkdir()
@@ -98,10 +178,13 @@ def package(root, target=None, web=False):
                 assert binary.is_file() and binary.stat().st_size, f"Missing release binary: {binary}"
                 shutil.copy2(binary, staging / binary.name)
             smoke_server(staging / ("restrust-server" + extension), version)
+            if "linux" in target:
+                outputs.append(build_deb(root, target, version, source))
         for filename in ["README.md", "LICENSE-MIT", "LICENSE-APACHE"]:
             shutil.copy2(root / filename, staging / filename)
         shutil.copytree(root / "docs", staging / "docs")
-        return archive_directory(staging, root / "dist" / (name + suffix), windows or web)
+        outputs.append(archive_directory(staging, root / "dist" / (name + suffix), windows or web))
+        return outputs
 
 
 if __name__ == "__main__":
@@ -110,4 +193,5 @@ if __name__ == "__main__":
     group.add_argument("--target")
     group.add_argument("--web", action="store_true")
     args = parser.parse_args()
-    print(package(ROOT, args.target, args.web))
+    for packaged in package(ROOT, args.target, args.web):
+        print(packaged)
