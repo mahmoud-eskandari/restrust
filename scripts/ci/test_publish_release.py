@@ -62,6 +62,12 @@ class PublishReleaseTests(unittest.TestCase):
         self.assertEqual(github.release["draft"], False)
         self.assertEqual(github.release["prerelease"], True)
 
+    def test_deb_names_match_debian_packaged_prereleases(self):
+        # package_release writes prerelease debs with '~' versions; publishing
+        # must look for exactly those files (regression: '-' vs '~').
+        self.assertEqual(deb_name("0.1.0-beta", "amd64"), "restrust_0.1.0~beta_amd64.deb")
+        self.assertEqual(deb_name("0.1.0", "arm64"), "restrust_0.1.0_arm64.deb")
+
     def test_retry_skips_all_matching_published_assets(self):
         github = FakeGitHub({"draft": False, "assets": []})
         publish_assets(REPOSITORY, TAG, self.directory, github)
@@ -102,10 +108,11 @@ class PublishReleaseTests(unittest.TestCase):
 
     def test_new_stable_release_is_not_marked_as_prerelease(self):
         for path in list(self.directory.iterdir()):
-            renamed = path.with_name(path.name.replace("0.1.0-beta", "0.1.0"))
+            stable = path.name.replace("0.1.0-beta", "0.1.0").replace("0.1.0~beta", "0.1.0")
+            renamed = path.with_name(stable)
             path.rename(renamed)
             if renamed.name.endswith(".sha256"):
-                renamed.write_text(renamed.read_text().replace("0.1.0-beta", "0.1.0"))
+                renamed.write_text(renamed.read_text().replace("0.1.0-beta", "0.1.0").replace("0.1.0~beta", "0.1.0"))
         github = FakeGitHub(None)
         publish_assets(REPOSITORY, "v0.1.0", self.directory, github)
         self.assertIn("--prerelease=false", github.writes()[0])

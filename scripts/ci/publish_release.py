@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 from urllib.parse import quote
 
+from package_release import deb_version
 from release_version import SEMVER
 
 ARCHIVES = (
@@ -22,7 +23,7 @@ DEB_ARCHITECTURES = ("amd64", "arm64")
 
 
 def deb_name(version, architecture):
-    return f"restrust_{version}_{architecture}.deb"
+    return f"restrust_{deb_version(version)}_{architecture}.deb"
 
 
 def gh(*arguments):
