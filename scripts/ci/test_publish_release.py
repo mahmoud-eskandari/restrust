@@ -32,7 +32,8 @@ class FakeGitHub:
                 if argument == "--clobber":
                     continue
                 path = Path(argument)
-                self.release["assets"].append({"name": path.name, "digest": "sha256:" + digest(path)})
+                # GitHub stores release asset names with '~' rewritten to '.'.
+                self.release["assets"].append({"name": path.name.replace("~", "."), "digest": "sha256:" + digest(path)})
         return ""
 
     def writes(self):
@@ -67,6 +68,15 @@ class PublishReleaseTests(unittest.TestCase):
         # must look for exactly those files (regression: '-' vs '~').
         self.assertEqual(deb_name("0.1.0-beta", "amd64"), "restrust_0.1.0~beta_amd64.deb")
         self.assertEqual(deb_name("0.1.0", "arm64"), "restrust_0.1.0_arm64.deb")
+
+    def test_manifest_lists_github_download_names(self):
+        # GitHub rewrites '~' to '.' in asset names, so SHA256SUMS must list
+        # the names users actually download for `sha256sum -c` to work.
+        verified_assets(self.directory, TAG)
+        manifest = (self.directory / "SHA256SUMS").read_text(encoding="utf-8")
+        self.assertNotIn("~", manifest)
+        self.assertIn("restrust_0.1.0.beta_amd64.deb", manifest)
+        self.assertIn("restrust_0.1.0.beta_arm64.deb", manifest)
 
     def test_retry_skips_all_matching_published_assets(self):
         github = FakeGitHub({"draft": False, "assets": []})

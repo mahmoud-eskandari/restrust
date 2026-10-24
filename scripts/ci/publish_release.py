@@ -26,6 +26,12 @@ def deb_name(version, architecture):
     return f"restrust_{deb_version(version)}_{architecture}.deb"
 
 
+def asset_name(name):
+    """GitHub release assets replace '~' with '.' in their stored names; the
+    checksum manifest and remote comparisons must use the downloaded name."""
+    return name.replace("~", ".")
+
+
 def gh(*arguments):
     return subprocess.run(["gh", *map(str, arguments)], check=True, capture_output=True, text=True).stdout
 
@@ -50,11 +56,12 @@ def verified_assets(directory, tag):
     for path in files:
         if not path.is_file() or not path.stat().st_size:
             raise ValueError(f"Missing release archive: {path.name}")
-        expected = f"{digest(path)}  {path.name}"
+        archive_digest = digest(path)
         checksum = path.with_name(path.name + ".sha256")
+        expected = f"{archive_digest}  {path.name}"
         if not checksum.is_file() or checksum.read_text(encoding="utf-8").strip() != expected:
             raise ValueError(f"Checksum mismatch: {path.name}")
-        checksums.append(expected)
+        checksums.append(f"{archive_digest}  {asset_name(path.name)}")
     manifest = directory / "SHA256SUMS"
     manifest.write_text("\n".join(checksums) + "\n", encoding="utf-8")
     return [*files, manifest]
@@ -89,15 +96,15 @@ def publish_assets(repository, tag, directory, command=gh):
     # retry after a partial upload safe, without --clobber on a published release.
     with tempfile.TemporaryDirectory(prefix="restrust-existing-assets-") as temporary:
         for path in files:
-            asset = existing.get(path.name)
+            asset = existing.get(asset_name(path.name))
             if asset is None:
                 missing.append(path)
                 continue
             remote_digest = asset.get("digest")
             if not remote_digest:
                 command("release", "download", tag, "--repo", repository,
-                        "--pattern", path.name, "--dir", temporary)
-                remote_digest = "sha256:" + digest(Path(temporary) / path.name)
+                        "--pattern", asset_name(path.name), "--dir", temporary)
+                remote_digest = "sha256:" + digest(Path(temporary) / asset_name(path.name))
             if remote_digest != "sha256:" + digest(path):
                 raise ValueError(f"Published asset differs: {path.name}. It will not be overwritten.")
     if missing:
